@@ -1,10 +1,13 @@
 use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, ThreadId};
+
+use crate::util::RcWake;
 
 pub struct Executor {
     queue: TaskQueue,
@@ -21,19 +24,28 @@ impl Executor {
         }
     }
 
-    pub fn spawn<F>(&self, future: F)
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
-        F: Future<Output = ()> + 'static,
+        F: Future + 'static,
     {
         let task = Rc::new(InnerTask {
-            thread_id: thread::current().id(),
+            value: Cell::new(None),
+            waiter: Cell::new(None),
             queue: self.queue.clone(),
             state: Cell::new(State::Waiting),
-            future: UnsafeCell::new(Box::pin(future)),
+            created_on: thread::current().id(),
+            future: UnsafeCell::new(Box::pin(async move {
+                Box::into_raw(Box::new(future.await)) as *mut ()
+            })),
         });
 
         unsafe {
-            (*self.queue.get()).push_back(task);
+            (*self.queue.get()).push_back(task.clone());
+        }
+
+        JoinHandle {
+            task,
+            _t: PhantomData,
         }
     }
 
@@ -41,15 +53,19 @@ impl Executor {
         unsafe {
             if let Some(task) = (*self.queue.get()).pop_front() {
                 task.state.set(State::Polling);
-                let waker = raw::waker(task.clone());
+                let waker = task.clone().into_waker();
                 let mut cx = Context::from_waker(&waker);
                 let mut fut = Pin::new_unchecked(&mut *task.future.get());
 
-                loop {
-                    if fut.as_mut().poll(&mut cx).is_ready() {
-                        break task.state.set(State::Complete);
-                    }
+                if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+                    task.value.set(Some(val));
+                    task.state.set(State::Complete);
 
+                    if let Some(waker) = task.waiter.take() {
+                        dbg!("WAKING");
+                        waker.wake();
+                    }
+                } else {
                     task.state.set(State::Waiting);
                 }
 
@@ -61,20 +77,63 @@ impl Executor {
     }
 }
 
+pub struct JoinHandle<T> {
+    task: Task,
+    _t: PhantomData<T>,
+}
+
+impl<T> Future for JoinHandle<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.task.state.get() {
+            State::Complete => unsafe {
+                dbg!("COMPLETE");
+                let val = Box::from_raw(self.task.value.get().unwrap() as *mut T);
+                Poll::Ready(*val)
+            },
+            _ => {
+                dbg!("SETTING WAITER");
+                self.task.waiter.set(Some(cx.waker().clone()));
+                Poll::Pending
+            }
+        }
+    }
+}
+
 type Task = Rc<InnerTask>;
 
 pub(crate) struct InnerTask {
-    thread_id: ThreadId,
     queue: TaskQueue,
     state: Cell<State>,
-    future: UnsafeCell<Pin<Box<dyn Future<Output = ()>>>>,
+    value: Cell<Option<*mut ()>>,
+    waiter: Cell<Option<Waker>>,
+    future: UnsafeCell<Pin<Box<dyn Future<Output = *mut ()>>>>,
+    created_on: ThreadId,
 }
 
-impl InnerTask {
-    fn assert_not_sent(&self) {
-        if thread::current().id() != self.thread_id {
-            panic!("cannot use waker from outside the thread it was created on");
+unsafe impl RcWake for InnerTask {
+    fn wake(self: Rc<Self>) {
+        loop {
+            match self.state.get() {
+                State::Waiting => {
+                    self.state.set(State::Polling);
+                    unsafe {
+                        (*self.queue.get()).push_back(self.clone());
+                    }
+                    break;
+                }
+                State::Polling => {
+                    self.state.set(State::Repoll);
+                    break;
+                }
+                _ => break,
+            }
         }
+    }
+
+    fn created_on(&self) -> ThreadId {
+        self.created_on
     }
 }
 
@@ -84,74 +143,4 @@ enum State {
     Polling,
     Repoll,
     Complete,
-}
-
-mod raw {
-    use super::*;
-
-    use std::mem::{self, ManuallyDrop};
-
-    pub(crate) unsafe fn waker(task: Rc<InnerTask>) -> Waker {
-        Waker::from_raw(RawWaker::new(
-            Rc::into_raw(task) as *const (),
-            &RawWakerVTable::new(clone, wake, wake_ref, drop),
-        ))
-    }
-
-    unsafe fn clone(task: *const ()) -> RawWaker {
-        let task = Rc::from_raw(task as *const InnerTask);
-        task.assert_not_sent();
-        mem::forget(task.clone());
-
-        RawWaker::new(
-            Rc::into_raw(task) as _,
-            &RawWakerVTable::new(clone, wake, wake_ref, drop),
-        )
-    }
-
-    unsafe fn drop(task: *const ()) {
-        let task = Rc::from_raw(task as *const InnerTask);
-        task.assert_not_sent();
-        mem::drop(task);
-    }
-
-    unsafe fn wake(task: *const ()) {
-        let task = Rc::from_raw(task as *const InnerTask);
-        task.assert_not_sent();
-
-        loop {
-            match task.state.get() {
-                State::Waiting => {
-                    task.state.set(State::Polling);
-                    (*task.queue.get()).push_back(task.clone());
-                    break;
-                }
-                State::Polling => {
-                    task.state.set(State::Repoll);
-                    break;
-                }
-                _ => break,
-            }
-        }
-    }
-
-    unsafe fn wake_ref(task: *const ()) {
-        let task = ManuallyDrop::new(Rc::from_raw(task as *const InnerTask));
-        task.assert_not_sent();
-
-        loop {
-            match task.state.get() {
-                State::Waiting => {
-                    task.state.set(State::Polling);
-                    (*task.queue.get()).push_back((*task).clone());
-                    break;
-                }
-                State::Polling => {
-                    task.state.set(State::Repoll);
-                    break;
-                }
-                _ => break,
-            }
-        }
-    }
 }

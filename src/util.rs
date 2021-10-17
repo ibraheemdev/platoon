@@ -1,7 +1,10 @@
 use std::future::Future;
 use std::hash::Hasher;
+use std::mem::{self, ManuallyDrop};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::thread::{self, ThreadId};
 
 pub async fn poll_fn<T, F>(f: F) -> T
 where
@@ -67,5 +70,66 @@ pub fn wake(waker: Waker) {
     #[cfg(not(debug_assertions))]
     {
         let _ = std::panic::catch_unwind(|| waker.wake());
+    }
+}
+
+pub unsafe trait RcWake: 'static {
+    fn wake(self: Rc<Self>);
+    fn created_on(&self) -> ThreadId;
+
+    fn wake_by_ref(self: &Rc<Self>) {
+        self.clone().wake();
+    }
+
+    fn into_waker(self: Rc<Self>) -> Waker
+    where
+        Self: Sized,
+    {
+        unsafe fn assert_not_sent(waker: &Rc<impl RcWake>) {
+            if thread::current().id() != waker.created_on() {
+                panic!("cannot use waker from outside the thread it was created on");
+            }
+        }
+
+        unsafe fn clone<W: RcWake>(waker: *const ()) -> RawWaker {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            mem::forget(waker.clone());
+
+            RawWaker::new(
+                Rc::into_raw(waker) as *const (),
+                &RawWakerVTable::new(clone::<W>, wake::<W>, wake_by_ref::<W>, drop::<W>),
+            )
+        }
+
+        unsafe fn wake<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            W::wake(waker);
+        }
+
+        unsafe fn wake_by_ref<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { ManuallyDrop::new(Rc::from_raw(waker as *const W)) };
+            assert_not_sent(&waker);
+            W::wake_by_ref(&waker);
+        }
+
+        unsafe fn drop<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            let _ = waker;
+        }
+
+        let raw = RawWaker::new(
+            Rc::into_raw(self) as *const (),
+            &RawWakerVTable::new(
+                clone::<Self>,
+                wake::<Self>,
+                wake_by_ref::<Self>,
+                drop::<Self>,
+            ),
+        );
+
+        unsafe { Waker::from_raw(raw) }
     }
 }
