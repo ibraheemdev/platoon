@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 mod clock;
 mod executor;
 mod reactor;

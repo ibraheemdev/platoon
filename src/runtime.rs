@@ -1,14 +1,15 @@
 use crate::clock::Clock;
-use crate::executor::Executor;
+use crate::executor::{Executor, JoinHandle};
 use crate::reactor::Reactor;
-use crate::util;
+use crate::util::{self, RcWake};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
+use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 thread_local! {
@@ -17,13 +18,15 @@ thread_local! {
 
 #[derive(Clone)]
 pub struct Runtime {
-    inner: Rc<Inner>,
+    shared: Rc<Shared>,
 }
 
-struct Inner {
+struct Shared {
     clock: Clock,
     reactor: Reactor,
     executor: Executor,
+    woke_up: Cell<bool>,
+    created_on: ThreadId,
 }
 
 const POLLS_PER_TICK: usize = 61;
@@ -33,10 +36,12 @@ const INITIAL_TASKS: usize = 64;
 impl Runtime {
     pub fn new() -> io::Result<Self> {
         Reactor::with_capacity(INITIAL_SOURCES).map(|reactor| Self {
-            inner: Rc::new(Inner {
+            shared: Rc::new(Shared {
                 reactor,
+                woke_up: Cell::new(false),
                 clock: Clock::new(),
                 executor: Executor::with_capacity(INITIAL_TASKS),
+                created_on: thread::current().id(),
             }),
         })
     }
@@ -54,20 +59,33 @@ impl Runtime {
         F: Future,
     {
         let mut future = unsafe { Pin::new_unchecked(&mut future) };
-        let waker = util::noop_waker();
+        let waker = self.shared.clone().into_waker();
         let mut cx = Context::from_waker(&waker);
 
-        loop {
-            if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
-                return val;
+        // make sure the main future is polled
+        // on the first iteration of 'run
+        self.shared.woke_up.set(true);
+
+        'block_on: loop {
+            if self.shared.woke_up.replace(false) {
+                if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
+                    return val;
+                }
             }
 
             for _ in 0..POLLS_PER_TICK {
-                if !self.inner.executor.poll_one() {
+                if !self.shared.executor.poll_one() {
                     // there are no tasks to run, so
                     // just park until the next timer
                     // or IO event
                     self.drive_io(|next_timer| next_timer);
+                    continue 'block_on;
+                }
+
+                // polling this task woke up the main
+                // future
+                if self.shared.woke_up.get() {
+                    continue 'block_on;
                 }
             }
 
@@ -78,14 +96,14 @@ impl Runtime {
     fn drive_io(&self, duration: impl Fn(Option<Duration>) -> Option<Duration>) {
         let mut wakers = Vec::new();
 
-        let next_timer = self.inner.clock.take_ready(&mut wakers);
+        let next_timer = self.shared.clock.take_past_alarms(&mut wakers);
 
-        self.inner
+        self.shared
             .reactor
             .run(duration(next_timer), &mut wakers)
             .unwrap();
 
-        self.inner.clock.take_ready(&mut wakers);
+        self.shared.clock.take_past_alarms(&mut wakers);
 
         for waker in wakers {
             util::wake(waker);
@@ -93,17 +111,27 @@ impl Runtime {
     }
 }
 
-pub fn spawn<F>(future: F)
+unsafe impl RcWake for Shared {
+    fn wake(self: Rc<Self>) {
+        self.woke_up.set(true);
+    }
+
+    fn created_on(&self) -> ThreadId {
+        self.created_on
+    }
+}
+
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
-    F: Future<Output = ()> + 'static,
+    F: Future + 'static,
 {
     RUNTIME.with(|rt| {
         rt.borrow()
             .as_ref()
             .expect(util::NO_RUNTIME)
-            .inner
+            .shared
             .executor
-            .spawn(future);
+            .spawn(future)
     })
 }
 

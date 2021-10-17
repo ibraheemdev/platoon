@@ -2,11 +2,9 @@ use crate::util;
 
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
-use std::future::Future;
 use std::hash::BuildHasherDefault;
 use std::io;
 use std::os::unix::prelude::RawFd;
-use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 

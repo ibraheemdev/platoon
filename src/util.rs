@@ -73,6 +73,14 @@ pub fn wake(waker: Waker) {
     }
 }
 
+/// `RcWake` is similar to `Wake`, except wakers
+/// are reference counted through `Rc` instead of
+/// `Arc`.
+///
+/// # Safety
+///
+/// `created_on` must return the `ThreadId` of thread that the
+/// waker was created on.
 pub unsafe trait RcWake: 'static {
     fn wake(self: Rc<Self>);
     fn created_on(&self) -> ThreadId;

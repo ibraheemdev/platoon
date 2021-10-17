@@ -62,7 +62,6 @@ impl Executor {
                     task.state.set(State::Complete);
 
                     if let Some(waker) = task.waiter.take() {
-                        dbg!("WAKING");
                         waker.wake();
                     }
                 } else {
@@ -88,12 +87,10 @@ impl<T> Future for JoinHandle<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.task.state.get() {
             State::Complete => unsafe {
-                dbg!("COMPLETE");
                 let val = Box::from_raw(self.task.value.get().unwrap() as *mut T);
                 Poll::Ready(*val)
             },
             _ => {
-                dbg!("SETTING WAITER");
                 self.task.waiter.set(Some(cx.waker().clone()));
                 Poll::Pending
             }

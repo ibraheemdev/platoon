@@ -19,7 +19,7 @@ impl Clock {
         }
     }
 
-    pub fn insert(&self, at: Instant, waker: &Waker) -> usize {
+    pub fn insert_alarm(&self, at: Instant, waker: &Waker) -> usize {
         let id = self.next_id.get();
         unsafe {
             (*self.alarms.get()).insert((at, id), waker.clone());
@@ -28,13 +28,13 @@ impl Clock {
         id
     }
 
-    pub fn remove(&self, at: Instant, id: usize) {
+    pub fn remove_alarm(&self, at: Instant, id: usize) {
         unsafe {
             (*self.alarms.get()).remove(&(at, id)).unwrap();
         }
     }
 
-    pub fn take_ready(&self, wakers: &mut Vec<Waker>) -> Option<Duration> {
+    pub fn take_past_alarms(&self, wakers: &mut Vec<Waker>) -> Option<Duration> {
         let map = unsafe { &mut *self.alarms.get() };
         let now = Instant::now();
 
@@ -53,9 +53,8 @@ impl Clock {
             wakers.push(waker);
         }
 
-        // Round up to 1ms here - this avoids
-        // very short-duration microsecond-resolution sleeps that the OS
-        // might treat as zero-length.
+        // Round up to 1ms here to avoid short sleeps
+        // that the OS might treat as zero-length.
         // TODO: this cast could be bad
         dur.map(|d| Duration::from_millis(d.as_millis() as _))
     }
