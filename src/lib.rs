@@ -1,16 +1,13 @@
 #![allow(unused_unsafe)]
 
-mod clock;
-mod executor;
-mod reactor;
-mod runtime;
+pub mod runtime;
+pub mod task;
+pub mod time;
+
 mod util;
 
-pub use clock::{
-    interval, interval_at, sleep, sleep_until, timeout, timeout_at, Interval, Sleep, TimedOut,
-    Timeout,
-};
-pub use runtime::{spawn, Runtime};
+pub use runtime::Runtime;
+pub use task::spawn;
 
 #[test]
 fn it_works() -> std::io::Result<()> {
@@ -23,7 +20,7 @@ fn it_works() -> std::io::Result<()> {
         for _ in 0..100 {
             let x = x.clone();
             let h = spawn(async move {
-                sleep(std::time::Duration::from_millis(10)).await;
+                time::sleep(std::time::Duration::from_millis(10)).await;
                 x.set(x.get() + 1);
                 x.get()
             });

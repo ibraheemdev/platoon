@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::hash::Hasher;
 use std::mem::{self, ManuallyDrop};
@@ -86,7 +87,7 @@ pub unsafe trait RcWake: 'static {
     fn created_on(&self) -> ThreadId;
 
     fn wake_by_ref(self: &Rc<Self>) {
-        self.clone().wake();
+        self.clone().wake()
     }
 
     fn into_waker(self: Rc<Self>) -> Waker
