@@ -13,8 +13,6 @@ pub struct Executor {
     queue: TaskQueue,
 }
 
-unsafe impl Send for Executor {}
-
 type TaskQueue = Rc<UnsafeCell<VecDeque<Task>>>;
 
 impl Executor {

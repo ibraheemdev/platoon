@@ -15,8 +15,6 @@ pub struct Reactor {
     events: UnsafeCell<Vec<polling::Event>>,
 }
 
-unsafe impl Send for Reactor {}
-
 type Sources = HashMap<usize, Source, BuildHasherDefault<util::UsizeHasher>>;
 
 impl Reactor {

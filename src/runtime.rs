@@ -13,16 +13,16 @@ use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 thread_local! {
-    pub(crate) static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
+    static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
 }
 
 #[derive(Clone)]
 pub struct Runtime {
-    shared: Rc<Shared>,
+    pub(crate) shared: Rc<Shared>,
 }
 
-struct Shared {
-    clock: Clock,
+pub(crate) struct Shared {
+    pub(crate) clock: Clock,
     reactor: Reactor,
     executor: Executor,
     woke_up: Cell<bool>,
