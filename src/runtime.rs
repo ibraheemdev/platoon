@@ -46,8 +46,21 @@ impl Runtime {
         })
     }
 
-    pub fn set(&self) {
-        RUNTIME.with(|rt| rt.borrow_mut().replace(self.clone()));
+    #[must_use = "Creating and immediately dropping an enter guard does nothing"]
+    pub fn enter(&self) -> impl Drop + '_ {
+        struct EnterGuard(Option<Runtime>);
+
+        impl Drop for EnterGuard {
+            fn drop(&mut self) {
+                RUNTIME.with(|rt| {
+                    *rt.borrow_mut() = self.0.take();
+                });
+            }
+        }
+
+        let old = RUNTIME.with(|rt| rt.borrow_mut().replace(self.clone()));
+
+        EnterGuard(old)
     }
 
     pub fn current() -> Option<Self> {
@@ -58,6 +71,8 @@ impl Runtime {
     where
         F: Future,
     {
+        let _enter = self.enter();
+
         let mut future = unsafe { Pin::new_unchecked(&mut future) };
         let waker = self.shared.clone().into_waker();
         let mut cx = Context::from_waker(&waker);
@@ -132,17 +147,5 @@ where
             .shared
             .executor
             .spawn(future)
-    })
-}
-
-pub fn block_on<F>(future: F) -> F::Output
-where
-    F: Future,
-{
-    RUNTIME.with(|rt| {
-        rt.borrow()
-            .as_ref()
-            .expect(util::NO_RUNTIME)
-            .block_on(future)
     })
 }
