@@ -1,4 +1,5 @@
 use std::cell::UnsafeCell;
+// use std::thread::LocalKey;
 use std::future::Future;
 use std::hash::Hasher;
 use std::mem::{self, ManuallyDrop};
@@ -140,5 +141,33 @@ pub unsafe trait RcWake: 'static {
         );
 
         unsafe { Waker::from_raw(raw) }
+    }
+}
+
+pub struct LocalCell<T> {
+    value: UnsafeCell<T>,
+}
+
+impl<T> LocalCell<T> {
+    pub fn new(value: T) -> LocalCell<T> {
+        LocalCell {
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `with` must not be called again within the closure.
+    pub unsafe fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        // SAFETY:
+        // - caller guarantees that `with` will
+        //  not be called in `f`, and that is the only
+        //  way to get a reference to `val`.
+        // - LocalCell is !Sync
+        let value = unsafe { &mut *self.value.get() };
+        f(value)
     }
 }

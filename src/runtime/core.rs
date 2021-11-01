@@ -1,4 +1,4 @@
-use crate::util::{self, RcWake};
+use crate::util::{self, LocalCell, RcWake};
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -15,7 +15,12 @@ use std::{io, mem};
 
 use polling::{Event, Poller};
 
+#[derive(Clone)]
 pub struct Core {
+    shared: Rc<LocalCell<Shared>>,
+}
+
+pub struct Shared {
     tick: usize,
     next_id: usize,
     poller: Poller,
@@ -36,76 +41,87 @@ const INITIAL_TASKS: usize = 64;
 impl Core {
     pub fn new() -> io::Result<Self> {
         Ok(Core {
-            tick: 0,
-            next_id: 0,
-            poller: Poller::new()?,
-            queue: TaskQueue::with_capacity(INITIAL_TASKS),
-            events: Vec::new(),
-            woke_up: false,
-            created_on: thread::current().id(),
-            alarms: BTreeMap::new(),
-            sources: HashMap::with_capacity_and_hasher(INITIAL_SOURCES, Default::default()),
+            shared: Rc::new(LocalCell::new(Shared {
+                tick: 0,
+                next_id: 0,
+                poller: Poller::new()?,
+                queue: TaskQueue::with_capacity(INITIAL_TASKS),
+                events: Vec::new(),
+                woke_up: false,
+                created_on: thread::current().id(),
+                alarms: BTreeMap::new(),
+                sources: HashMap::with_capacity_and_hasher(INITIAL_SOURCES, Default::default()),
+            })),
         })
     }
 
-    pub fn insert_source(&mut self, raw: RawFd) -> io::Result<usize> {
-        let key = self.sources.len();
-        self.poller.add(raw, polling::Event::none(key))?;
-        self.sources.insert(
-            key,
-            Source {
-                raw,
-                key,
-                read: Default::default(),
-                write: Default::default(),
-            },
-        );
-        Ok(key)
+    pub fn insert_source(&self, raw: RawFd) -> io::Result<usize> {
+        unsafe {
+            self.shared.with(|shared| {
+                let key = shared.sources.len();
+                shared.poller.add(raw, polling::Event::none(key))?;
+                shared.sources.insert(
+                    key,
+                    Source {
+                        raw,
+                        key,
+                        read: Default::default(),
+                        write: Default::default(),
+                    },
+                );
+                Ok(key)
+            })
+        }
     }
 
-    pub fn remove_source(&mut self, key: usize) -> io::Result<()> {
-        let source = self.sources.remove(&key).unwrap();
-        self.poller.delete(source.raw)
+    pub fn remove_source(&self, key: usize) -> io::Result<()> {
+        unsafe {
+            self.shared.with(|shared| {
+                let source = shared.sources.remove(&key).unwrap();
+                shared.poller.delete(source.raw)
+            })
+        }
     }
 
     pub fn poll_ready(
-        &mut self,
+        &self,
         key: usize,
         direction: Direction,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        let source = unsafe { self.sources.get_mut(&key).unwrap() };
-        let interest = source.interest(direction);
+        unsafe {
+            self.shared.with(|shared| {
+                let source = unsafe { shared.sources.get_mut(&key).unwrap() };
+                let interest = source.interest(direction);
 
-        if interest
-            .poll_ticks
-            .iter()
-            .flatten()
-            .all(|&t| t != interest.last_tick)
-        {
-            interest.poll_ticks = None;
-            return Poll::Ready(Ok(()));
+                if let Some(ticks) = interest.poll_ticks {
+                    if ticks.iter().all(|&t| t != interest.last_tick) {
+                        interest.poll_ticks = None;
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+
+                let should_modify = !interest.has_interest();
+
+                if let Some(waker) = interest.poller.take() {
+                    if waker.will_wake(cx.waker()) {
+                        interest.poller = Some(waker);
+                        return Poll::Pending;
+                    }
+
+                    util::wake(waker);
+                }
+
+                interest.poller = Some(cx.waker().clone());
+                interest.poll_ticks = Some([shared.tick, interest.last_tick]);
+
+                if should_modify {
+                    Self::modify_source(&shared.poller, &source)?;
+                }
+
+                Poll::Pending
+            })
         }
-
-        let should_modify = !interest.has_interest();
-
-        if let Some(waker) = interest.poller.take() {
-            if waker.will_wake(cx.waker()) {
-                interest.poller = Some(waker);
-                return Poll::Pending;
-            }
-
-            util::wake(waker);
-        }
-
-        interest.poller = Some(cx.waker().clone());
-        interest.poll_ticks = Some([self.tick, interest.last_tick]);
-
-        if should_modify {
-            Self::modify_source(&self.poller, &source)?;
-        }
-
-        Poll::Pending
     }
 
     fn modify_source(poller: &polling::Poller, source: &Source) -> io::Result<()> {
@@ -119,49 +135,160 @@ impl Core {
         )
     }
 
-    pub fn insert_alarm(&mut self, at: Instant, waker: Waker) -> usize {
-        let id = self.next_id;
-        self.alarms.insert((at, id), waker);
-        self.next_id += 1;
-        id
+    pub fn insert_alarm(&self, at: Instant, waker: Waker) -> usize {
+        unsafe {
+            self.shared.with(|shared| {
+                let id = shared.next_id;
+                shared.alarms.insert((at, id), waker);
+                shared.next_id += 1;
+                id
+            })
+        }
     }
 
-    pub fn remove_alarm(&mut self, id: usize, at: Instant) {
-        self.alarms.remove(&(at, id));
+    pub fn remove_alarm(&self, id: usize, at: Instant) {
+        unsafe {
+            self.shared.with(|shared| {
+                shared.alarms.remove(&(at, id));
+            })
+        }
     }
 
-    pub fn reset_alarm(&mut self, id: usize, old: Instant, new: Instant) {
-        let waker = self.alarms.remove(&(old, id)).unwrap();
-        self.alarms.insert((new, id), waker);
+    pub fn reset_alarm(&self, id: usize, old: Instant, new: Instant) {
+        unsafe {
+            self.shared.with(|shared| {
+                let waker = shared.alarms.remove(&(old, id)).unwrap();
+                shared.alarms.insert((new, id), waker);
+            })
+        }
     }
 
-    pub fn replace_alarm_waker(&mut self, id: usize, deadline: Instant, waker: Waker) {
-        *self.alarms.get_mut(&(deadline, id)).unwrap() = waker;
+    pub fn replace_alarm_waker(&self, id: usize, deadline: Instant, waker: Waker) {
+        unsafe {
+            self.shared.with(|shared| {
+                *shared.alarms.get_mut(&(deadline, id)).unwrap() = waker;
+            })
+        }
     }
 
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+    {
+        let future = async move { Box::into_raw(Box::new(future.await)) as *mut () };
+
+        let task = Rc::new(UnsafeCell::new(InnerTask {
+            value: None,
+            waiter: None,
+            core: self.clone(),
+            state: State::Waiting,
+            future: Box::pin(future),
+        }));
+
+        unsafe {
+            self.shared
+                .with(|shared| shared.queue.push_back(task.clone()));
+        }
+
+        JoinHandle {
+            task,
+            _t: PhantomData,
+        }
+    }
+
+    pub fn block_on<F>(&self, mut future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = self.shared.clone().into_waker();
+        let mut future = unsafe { Pin::new_unchecked(&mut future) };
+        let mut cx = Context::from_waker(&waker);
+
+        unsafe {
+            self.shared.with(|shared| {
+                // make sure the main future is polled
+                // on the first iteration of 'run
+                shared.woke_up = true;
+
+                'block_on: loop {
+                    if shared.woke_up {
+                        shared.woke_up = false;
+                        if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
+                            return val;
+                        }
+                    }
+
+                    for _ in 0..POLLS_PER_TICK {
+                        match shared.queue.pop_front() {
+                            Some(task) => {
+                                let waker = task.clone().into_waker();
+                                let task = unsafe { &mut *task.get() };
+                                let mut cx = Context::from_waker(&waker);
+                                let mut fut = unsafe { Pin::new_unchecked(&mut task.future) };
+
+                                task.state = State::Polling;
+
+                                if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+                                    task.value = Some(val);
+                                    task.state = State::Complete;
+
+                                    if let Some(waker) = task.waiter.take() {
+                                        waker.wake();
+                                    }
+                                } else {
+                                    task.state = State::Waiting;
+                                }
+                            }
+                            None => {
+                                // there are no tasks to run, so
+                                // just park until the next timer
+                                // or IO event
+                                shared
+                                    .drive_io(|next_timer| next_timer)
+                                    .ok()
+                                    .expect("failed to drive IO");
+                                continue 'block_on;
+                            }
+                        }
+
+                        // polling this task woke up the main
+                        // future
+                        if shared.woke_up {
+                            continue 'block_on;
+                        }
+                    }
+
+                    shared
+                        .drive_io(|_| Some(Duration::from_millis(0)))
+                        .ok()
+                        .expect("failed to drive IO");
+                }
+            })
+        }
+    }
+}
+
+impl Shared {
     pub fn take_past_alarms(&mut self, wakers: &mut Vec<Waker>) -> Option<Duration> {
         let now = Instant::now();
 
         let later = self.alarms.split_off(&(now, 0));
         let ready = mem::replace(&mut self.alarms, later);
 
-        let dur = if ready.is_empty() {
+        let duration = if ready.is_empty() {
             self.alarms
                 .keys()
                 .next()
                 .map(|(when, _)| when.saturating_duration_since(now))
+                // round up to 1ms
+                .map(|d| Duration::from_millis(d.as_millis() as u64))
         } else {
             Some(Duration::from_secs(0))
         };
 
-        for waker in ready.into_values() {
-            wakers.push(waker);
-        }
+        wakers.extend(ready.into_values());
 
-        // Round up to 1ms here to avoid very short durations
-        // that might be treated as zero-length.
-        // TODO: this cast could be bad
-        dur.map(|d| Duration::from_millis(d.as_millis() as _))
+        duration
     }
 
     fn drive_io(
@@ -173,7 +300,9 @@ impl Core {
         self.events.clear();
 
         let mut wakers = Vec::new();
+
         let next_timer = self.take_past_alarms(&mut wakers);
+
         let timeout = timeout(next_timer);
 
         match self.poller.wait(&mut self.events, timeout) {
@@ -190,7 +319,7 @@ impl Core {
                         }
 
                         if source.read.has_interest() || source.write.has_interest() {
-                            Self::modify_source(&self.poller, &source)?;
+                            Core::modify_source(&self.poller, &source)?;
                         }
                     }
                 }
@@ -205,111 +334,26 @@ impl Core {
 
         Ok(())
     }
-
-    pub fn spawn<F>(&mut self, shared: Rc<UnsafeCell<Self>>, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + 'static,
-    {
-        let future = async move { Box::into_raw(Box::new(future.await)) as *mut () };
-
-        let task = Rc::new(UnsafeCell::new(InnerTask {
-            value: None,
-            waiter: None,
-            core: shared,
-            state: State::Waiting,
-            future: Box::pin(future),
-        }));
-
-        unsafe {
-            self.queue.push_back(task.clone());
-        }
-
-        JoinHandle {
-            task,
-            _t: PhantomData,
-        }
-    }
-
-    pub fn block_on<F>(&mut self, shared: Rc<UnsafeCell<Self>>, mut future: F) -> F::Output
-    where
-        F: Future,
-    {
-        let waker = shared.into_waker();
-        let mut future = unsafe { Pin::new_unchecked(&mut future) };
-        let mut cx = Context::from_waker(&waker);
-
-        // make sure the main future is polled
-        // on the first iteration of 'run
-        self.woke_up = true;
-
-        'block_on: loop {
-            if self.woke_up {
-                self.woke_up = false;
-                if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
-                    return val;
-                }
-            }
-
-            for _ in 0..POLLS_PER_TICK {
-                match self.queue.pop_front() {
-                    Some(task) => {
-                        let waker = task.clone().into_waker();
-                        let task = unsafe { &mut *task.get() };
-                        let mut cx = Context::from_waker(&waker);
-                        let mut fut = unsafe { Pin::new_unchecked(&mut task.future) };
-
-                        task.state = State::Polling;
-
-                        if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
-                            task.value = Some(val);
-                            task.state = State::Complete;
-
-                            if let Some(waker) = task.waiter.take() {
-                                waker.wake();
-                            }
-                        } else {
-                            task.state = State::Waiting;
-                        }
-                    }
-                    None => {
-                        // there are no tasks to run, so
-                        // just park until the next timer
-                        // or IO event
-                        self.drive_io(|next_timer| next_timer)
-                            .ok()
-                            .expect("failed to drive IO");
-                        continue 'block_on;
-                    }
-                }
-
-                // polling this task woke up the main
-                // future
-                if self.woke_up {
-                    continue 'block_on;
-                }
-            }
-
-            self.drive_io(|_| Some(Duration::from_millis(0)))
-                .ok()
-                .expect("failed to drive IO");
-        }
-    }
 }
 
-unsafe impl RcWake for UnsafeCell<Core> {
+unsafe impl RcWake for LocalCell<Shared> {
     fn wake(self: Rc<Self>) {
-        unsafe { (*self.get()).woke_up = true }
+        unsafe {
+            self.with(|shared| {
+                shared.woke_up = true;
+            })
+        }
     }
 
     fn created_on(&self) -> ThreadId {
-        unsafe { (*self.get()).created_on }
+        unsafe { self.with(|shared| shared.created_on) }
     }
 }
 
 type Task = Rc<UnsafeCell<InnerTask>>;
 
 pub(crate) struct InnerTask {
-    core: Rc<UnsafeCell<Core>>,
+    core: Core,
     state: State,
     value: Option<*mut ()>,
     waiter: Option<Waker>,
@@ -323,7 +367,9 @@ unsafe impl RcWake for UnsafeCell<InnerTask> {
             State::Waiting => {
                 this.state = State::Polling;
                 unsafe {
-                    (*this.core.get()).queue.push_back(self.clone());
+                    this.core.shared.with(|shared| {
+                        shared.queue.push_back(self.clone());
+                    })
                 }
             }
             State::Polling => {
@@ -334,7 +380,7 @@ unsafe impl RcWake for UnsafeCell<InnerTask> {
     }
 
     fn created_on(&self) -> ThreadId {
-        unsafe { (*(*self.get()).core.get()).created_on }
+        unsafe { (*self.get()).core.shared.with(|shared| shared.created_on) }
     }
 }
 

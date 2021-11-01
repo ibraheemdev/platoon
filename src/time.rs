@@ -27,9 +27,7 @@ pub struct Sleep {
 impl Sleep {
     pub fn reset(&mut self, deadline: Instant) {
         if let Some((id, _)) = self.alarm.as_mut() {
-            self.runtime
-                .shared
-                .reset_alarm(*id, self.deadline, deadline);
+            self.runtime.core.reset_alarm(*id, self.deadline, deadline);
         }
 
         self.deadline = deadline;
@@ -53,13 +51,13 @@ impl Future for Sleep {
         match alarm {
             Some((id, waker)) if !waker.will_wake(cx.waker()) => {
                 runtime
-                    .shared
+                    .core
                     .replace_alarm_waker(*id, *deadline, cx.waker().clone());
                 *waker = cx.waker().clone();
             }
             Some(_) => {}
             None => {
-                let id = runtime.shared.insert_alarm(*deadline, cx.waker().clone());
+                let id = runtime.core.insert_alarm(*deadline, cx.waker().clone());
                 *alarm = Some((id, cx.waker().clone()));
             }
         }
@@ -71,7 +69,7 @@ impl Future for Sleep {
 impl Drop for Sleep {
     fn drop(&mut self) {
         if let Some((id, _)) = self.alarm {
-            self.runtime.shared.remove_alarm(id, self.deadline);
+            self.runtime.core.remove_alarm(id, self.deadline);
         }
     }
 }

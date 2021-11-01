@@ -1,13 +1,10 @@
 pub(crate) mod core;
-pub(crate) mod shared;
 
 use self::core::{Core, JoinHandle};
-use self::shared::Shared;
 
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
-use std::rc::Rc;
 
 thread_local! {
     static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
@@ -15,16 +12,12 @@ thread_local! {
 
 #[derive(Clone)]
 pub struct Runtime {
-    pub(crate) shared: Shared,
+    pub(crate) core: Core,
 }
 
 impl Runtime {
     pub fn new() -> io::Result<Self> {
-        Core::new().map(|core| Self {
-            shared: Shared {
-                core: Rc::new(UnsafeCell::new(core)),
-            },
-        })
+        Core::new().map(|core| Self { core })
     }
 
     #[must_use = "Creating and immediately dropping an enter guard does nothing"]
@@ -52,14 +45,14 @@ impl Runtime {
     where
         F: Future + 'static,
     {
-        self.shared.spawn(future)
+        self.core.spawn(future)
     }
 
     pub fn block_on<F>(&self, future: F) -> F::Output
     where
         F: Future,
     {
-        self.shared.block_on(async move {
+        self.core.block_on(async move {
             let _enter = self.enter();
             future.await
         })
