@@ -1,14 +1,13 @@
-use crate::util::{self, LocalCell, RcWake};
+use crate::util::{self, LocalCell};
 
-use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::hash::BuildHasherDefault;
-use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 use std::{io, mem};
@@ -24,15 +23,13 @@ pub struct Shared {
     tick: usize,
     next_id: usize,
     poller: Poller,
-    queue: TaskQueue,
+    queue: VecDeque<Task>,
     events: Vec<Event>,
     woke_up: bool,
     created_on: ThreadId,
     alarms: BTreeMap<(Instant, usize), Waker>,
     sources: HashMap<usize, Source, BuildHasherDefault<util::UsizeHasher>>,
 }
-
-type TaskQueue = VecDeque<Task>;
 
 const POLLS_PER_TICK: usize = 61;
 const INITIAL_SOURCES: usize = 64;
@@ -45,7 +42,7 @@ impl Core {
                 tick: 0,
                 next_id: 0,
                 poller: Poller::new()?,
-                queue: TaskQueue::with_capacity(INITIAL_TASKS),
+                queue: VecDeque::with_capacity(INITIAL_TASKS),
                 events: Vec::new(),
                 woke_up: false,
                 created_on: thread::current().id(),
@@ -171,29 +168,26 @@ impl Core {
         }
     }
 
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    pub fn spawn<F>(&self, future: F) -> Task
     where
         F: Future + 'static,
     {
         let future = async move { Box::into_raw(Box::new(future.await)) as *mut () };
 
-        let task = Rc::new(UnsafeCell::new(InnerTask {
+        let task = Task(Rc::new(LocalCell::new(InnerTask {
             value: None,
             waiter: None,
             core: self.clone(),
             state: State::Waiting,
             future: Box::pin(future),
-        }));
+        })));
 
         unsafe {
             self.shared
                 .with(|shared| shared.queue.push_back(task.clone()));
         }
 
-        JoinHandle {
-            task,
-            _t: PhantomData,
-        }
+        task
     }
 
     pub fn block_on<F>(&self, mut future: F) -> F::Output
@@ -221,23 +215,24 @@ impl Core {
                     for _ in 0..POLLS_PER_TICK {
                         match shared.queue.pop_front() {
                             Some(task) => {
-                                let waker = task.clone().into_waker();
-                                let task = unsafe { &mut *task.get() };
-                                let mut cx = Context::from_waker(&waker);
-                                let mut fut = unsafe { Pin::new_unchecked(&mut task.future) };
+                                let waker = task.clone().0.into_waker();
+                                task.0.with(|task| {
+                                    let mut cx = Context::from_waker(&waker);
+                                    let mut fut = unsafe { Pin::new_unchecked(&mut task.future) };
 
-                                task.state = State::Polling;
+                                    task.state = State::Polling;
 
-                                if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
-                                    task.value = Some(val);
-                                    task.state = State::Complete;
+                                    if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+                                        task.value = Some(val);
+                                        task.state = State::Complete;
 
-                                    if let Some(waker) = task.waiter.take() {
-                                        waker.wake();
+                                        if let Some(waker) = task.waiter.take() {
+                                            waker.wake();
+                                        }
+                                    } else {
+                                        task.state = State::Waiting;
                                     }
-                                } else {
-                                    task.state = State::Waiting;
-                                }
+                                });
                             }
                             None => {
                                 // there are no tasks to run, so
@@ -350,9 +345,10 @@ unsafe impl RcWake for LocalCell<Shared> {
     }
 }
 
-type Task = Rc<UnsafeCell<InnerTask>>;
+#[derive(Clone)]
+pub struct Task(Rc<LocalCell<InnerTask>>);
 
-pub(crate) struct InnerTask {
+struct InnerTask {
     core: Core,
     state: State,
     value: Option<*mut ()>,
@@ -360,49 +356,108 @@ pub(crate) struct InnerTask {
     future: Pin<Box<dyn Future<Output = *mut ()>>>,
 }
 
-unsafe impl RcWake for UnsafeCell<InnerTask> {
+unsafe impl RcWake for LocalCell<InnerTask> {
     fn wake(self: Rc<Self>) {
-        let this = unsafe { &mut *self.get() };
-        match this.state {
-            State::Waiting => {
-                this.state = State::Polling;
-                unsafe {
-                    this.core.shared.with(|shared| {
-                        shared.queue.push_back(self.clone());
-                    })
+        unsafe {
+            self.with(|this| match this.state {
+                State::Waiting => {
+                    this.state = State::Polling;
+                    unsafe {
+                        this.core.shared.with(|shared| {
+                            shared.queue.push_back(Task(self.clone()));
+                        })
+                    }
                 }
-            }
-            State::Polling => {
-                this.state = State::Repoll;
-            }
-            _ => {}
+                State::Polling => {
+                    this.state = State::Repoll;
+                }
+                _ => {}
+            })
         }
     }
 
     fn created_on(&self) -> ThreadId {
-        unsafe { (*self.get()).core.shared.with(|shared| shared.created_on) }
+        unsafe { self.with(|this| this.core.shared.with(|shared| shared.created_on)) }
     }
 }
 
-pub struct JoinHandle<T> {
-    task: Task,
-    _t: PhantomData<T>,
+/// # Safety
+///
+/// `created_on` must return the `ThreadId` of thread that the
+/// waker was created on.
+pub unsafe trait RcWake: 'static {
+    fn wake(self: Rc<Self>);
+    fn created_on(&self) -> ThreadId;
+
+    fn wake_by_ref(self: &Rc<Self>) {
+        self.clone().wake()
+    }
+
+    fn into_waker(self: Rc<Self>) -> Waker
+    where
+        Self: Sized,
+    {
+        unsafe fn assert_not_sent(waker: &Rc<impl RcWake>) {
+            if thread::current().id() != waker.created_on() {
+                panic!("cannot use waker from outside the thread it was created on");
+            }
+        }
+
+        unsafe fn clone<W: RcWake>(waker: *const ()) -> RawWaker {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            mem::forget(waker.clone());
+
+            RawWaker::new(
+                Rc::into_raw(waker) as *const (),
+                &RawWakerVTable::new(clone::<W>, wake::<W>, wake_by_ref::<W>, drop::<W>),
+            )
+        }
+
+        unsafe fn wake<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            W::wake(waker);
+        }
+
+        unsafe fn wake_by_ref<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { ManuallyDrop::new(Rc::from_raw(waker as *const W)) };
+            assert_not_sent(&waker);
+            W::wake_by_ref(&waker);
+        }
+
+        unsafe fn drop<W: RcWake>(waker: *const ()) {
+            let waker = unsafe { Rc::from_raw(waker as *const W) };
+            assert_not_sent(&waker);
+            let _ = waker;
+        }
+
+        let raw = RawWaker::new(
+            Rc::into_raw(self) as *const (),
+            &RawWakerVTable::new(
+                clone::<Self>,
+                wake::<Self>,
+                wake_by_ref::<Self>,
+                drop::<Self>,
+            ),
+        );
+
+        unsafe { Waker::from_raw(raw) }
+    }
 }
 
-impl<T> Future for JoinHandle<T> {
-    type Output = T;
+impl Future for Task {
+    type Output = *mut ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let task = unsafe { &mut *self.task.get() };
-        match task.state {
-            State::Complete => unsafe {
-                let val = Box::from_raw(task.value.unwrap() as *mut T);
-                Poll::Ready(*val)
-            },
-            _ => {
-                task.waiter = Some(cx.waker().clone());
-                Poll::Pending
-            }
+        unsafe {
+            self.0.with(|task| match task.state {
+                State::Complete => unsafe { Poll::Ready(task.value.unwrap()) },
+                _ => {
+                    task.waiter = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
         }
     }
 }

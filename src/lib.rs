@@ -6,7 +6,7 @@ pub mod time;
 
 mod util;
 
-pub use runtime::Runtime;
+pub use runtime::{block_on, Runtime};
 pub use task::spawn;
 
 #[test]
@@ -21,14 +21,15 @@ fn it_works() -> std::io::Result<()> {
             let x = x.clone();
             let h = spawn(async move {
                 time::sleep(std::time::Duration::from_millis(10)).await;
+                let val = x.get();
                 x.set(x.get() + 1);
-                x.get()
+                val
             });
             handles.push(h);
         }
 
-        for handle in handles {
-            dbg!(handle.await);
+        for (i, handle) in handles.into_iter().enumerate() {
+            assert_eq!(handle.await, i);
         }
     });
 

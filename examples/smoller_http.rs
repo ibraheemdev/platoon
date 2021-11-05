@@ -1,38 +1,73 @@
-use std::net::SocketAddr;
-
-use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use smoller::net::{TcpListener, TcpStream};
+use hyper::{server::conn::Http, service::service_fn, Body, Request, Response};
+use smoller::net::TcpListener;
+use std::{convert::Infallible, net::SocketAddr};
 
 fn main() {
-    smoller::Runtime::new().unwrap().block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:3000".parse::<SocketAddr>().unwrap())
-            .await
-            .expect("failed to create TCP listener");
+    smoller::block_on(async move {
+        let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
 
+        let tcp_listener = TcpListener::bind(addr).await.unwrap();
         loop {
-            let stream = listener.accept().await.expect("client connection failed");
-            smoller::spawn(handle_connection(stream));
+            let tcp_stream = tcp_listener.accept().await.unwrap();
+            smoller::task::spawn(async move {
+                if let Err(http_err) = Http::new()
+                    .http1_only(true)
+                    .http1_keep_alive(true)
+                    .serve_connection(compat::HyperStream(tcp_stream), service_fn(hello))
+                    .await
+                {
+                    eprintln!("Error while serving HTTP connection: {}", http_err);
+                }
+            });
         }
-    });
+    })
+    .unwrap();
 }
 
-async fn handle_connection(mut stream: TcpStream) {
-    // === READ RAW BYTES ===
-    let mut request = Vec::new();
-    let mut reader = BufReader::new(&mut stream);
-    reader
-        .read_until(b'\n', &mut request)
-        .await
-        .expect("failed to read from stream");
+async fn hello(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    Ok(Response::new(Body::from("Hello World!")))
+}
 
-    // === WRITE RESPONSE ===
-    let response = concat!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
-        "Hello world!"
-    );
-    stream
-        .write(response.as_bytes())
-        .await
-        .expect("failed to write to stream");
-    stream.flush().await.expect("failed to flush stream");
+pub mod compat {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures::{AsyncRead, AsyncWrite};
+    use smoller::net::TcpStream;
+    use tokio::io::ReadBuf;
+
+    pub struct HyperStream(pub TcpStream);
+
+    impl tokio::io::AsyncRead for HyperStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let unfilled = buf.initialize_unfilled();
+            let poll = Pin::new(&mut self.0).poll_read(cx, unfilled);
+            if let Poll::Ready(Ok(num)) = &poll {
+                buf.advance(*num);
+            }
+            poll.map_ok(|_| ())
+        }
+    }
+
+    impl tokio::io::AsyncWrite for HyperStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_close(cx)
+        }
+    }
 }

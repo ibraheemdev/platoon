@@ -15,6 +15,11 @@ bytes = "0.4"
 httparse = "1.1.2"
 log = "0.3.6"
 time = "0.1"
+slab = "0.4.5"
 
 [dev-dependencies]
+hyper = { version = "0.14.14", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+debug = true

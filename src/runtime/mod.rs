@@ -1,10 +1,12 @@
 pub(crate) mod core;
 
-use self::core::{Core, JoinHandle};
+use self::core::Core;
+use crate::task::JoinHandle;
 
 use std::cell::RefCell;
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 
 thread_local! {
     static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
@@ -45,7 +47,10 @@ impl Runtime {
     where
         F: Future + 'static,
     {
-        self.core.spawn(future)
+        JoinHandle {
+            task: self.core.spawn(future),
+            _t: PhantomData,
+        }
     }
 
     pub fn block_on<F>(&self, future: F) -> F::Output
@@ -57,4 +62,11 @@ impl Runtime {
             future.await
         })
     }
+}
+
+pub fn block_on<F>(future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    Ok(Runtime::new()?.block_on(future))
 }

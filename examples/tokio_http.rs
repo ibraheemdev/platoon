@@ -1,35 +1,27 @@
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use hyper::{server::conn::Http, service::service_fn, Body, Request, Response};
+use std::{convert::Infallible, net::SocketAddr};
+use tokio::net::TcpListener;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let listener = TcpListener::bind("localhost:3000")
-        .await
-        .expect("failed to create TCP listener");
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
 
+    let tcp_listener = TcpListener::bind(addr).await?;
     loop {
-        let (stream, _) = listener.accept().await.expect("client connection failed");
-        tokio::spawn(handle_connection(stream));
+        let (tcp_stream, _) = tcp_listener.accept().await?;
+        tokio::task::spawn(async move {
+            if let Err(http_err) = Http::new()
+                .http1_only(true)
+                .http1_keep_alive(true)
+                .serve_connection(tcp_stream, service_fn(hello))
+                .await
+            {
+                eprintln!("Error while serving HTTP connection: {}", http_err);
+            }
+        });
     }
 }
 
-async fn handle_connection(mut stream: TcpStream) {
-    // === READ RAW BYTES ===
-    let mut request = Vec::new();
-    let mut reader = BufReader::new(&mut stream);
-    reader
-        .read_until(b'\n', &mut request)
-        .await
-        .expect("failed to read from stream");
-
-    // === WRITE RESPONSE ===
-    let response = concat!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
-        "Hello world!"
-    );
-    stream
-        .write(response.as_bytes())
-        .await
-        .expect("failed to write to stream");
-    stream.flush().await.expect("failed to flush stream");
+async fn hello(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    Ok(Response::new(Body::from("Hello World!")))
 }
