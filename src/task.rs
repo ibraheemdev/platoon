@@ -36,6 +36,10 @@ impl<T> Future for JoinHandle<T> {
     type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { Pin::new(&mut self.task).poll::<T>(cx) }
+        unsafe {
+            Pin::new(&mut self.task)
+                .poll::<T>(cx)
+                .map(|val| val.expect("task was cancelled"))
+        }
     }
 }
