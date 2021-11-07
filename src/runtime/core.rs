@@ -529,16 +529,12 @@ impl Interest {
 }
 
 mod new {
-    // TODO: abort_on_panics
+    // TODO: abort_on_panics, in async-task/header.rs too
     const SCHEDULED: usize = 1 << 0;
-    const RUNNING: usize = 1 << 1;
-    const COMPLETED: usize = 1 << 2;
-    const CLOSED: usize = 1 << 3;
-    const TASK: usize = 1 << 4;
-    const AWAITER: usize = 1 << 5;
-    const REGISTERING: usize = 1 << 6;
-    const NOTIFYING: usize = 1 << 7;
-    const REFERENCE: usize = 1 << 8;
+    const COMPLETED: usize = 1 << 1;
+    const CLOSED: usize = 1 << 2;
+    const TASK: usize = 1 << 3;
+    const REFERENCE: usize = 1 << 4;
 
     use std::{
         marker::PhantomData,
@@ -557,14 +553,11 @@ mod new {
     }
 
     impl Header {
-        fn take(&mut self, current: Option<&Waker>) -> Option<Waker> {
-            let waker = self.awaiter.take();
-
-            if let Some(w) = waker {
+        fn take_waker(&mut self, current: Option<&Waker>) -> Option<Waker> {
+            if let Some(w) = self.awaiter.take() {
                 match current {
                     None => return Some(w),
                     Some(c) if !w.will_wake(c) => return Some(w),
-                    // TODO: abort_on_panic
                     Some(_) => drop(w),
                 }
             }
@@ -593,20 +586,20 @@ mod new {
 
         unsafe fn drop_future(header: NonNull<Header>) {
             let raw = Self::from_raw(header);
-            raw.stage = Stage::Dropped;
+            if let Stage::Polling(_) = raw.stage {
+                raw.stage = Stage::Dropped;
+            }
         }
 
         unsafe fn get_output(header: NonNull<Header>, dst: *mut ()) {
             let raw = Self::from_raw(header);
 
-            let output = match mem::replace(unsafe { &mut raw.stage }, Stage::Dropped) {
+            let output = match mem::replace(&mut raw.stage, Stage::Dropped) {
                 Stage::Finished(output) => output,
                 _ => panic!("JoinHandle polled after completion"),
             };
 
-            unsafe {
-                *(dst as *mut F::Output) = output;
-            }
+            *(dst as *mut F::Output) = output;
         }
 
         unsafe fn drop_ref(header: NonNull<Header>) {
@@ -619,28 +612,19 @@ mod new {
         }
 
         unsafe fn destroy(header: NonNull<Header>) {
-            let _ = Box::from_raw(header.cast::<Self>().as_ptr());
+            let _ = Box::from_raw(Self::from_raw(header) as *mut _);
         }
 
         unsafe fn run(header: NonNull<Header>) -> bool {
             let raw = Self::from_raw(header);
 
-            let waker = ManuallyDrop::new(Waker::from_raw(Self::raw_waker(
-                header.as_ptr() as *const ()
-            )));
-            let cx = &mut Context::from_waker(&waker);
-
             let mut state = raw.header.state;
 
             if state & CLOSED != 0 {
-                Self::drop_future(header);
                 raw.header.state &= !SCHEDULED;
+                let awaiter = raw.header.take_waker(None);
 
-                let mut awaiter = None;
-                if state & AWAITER != 0 {
-                    awaiter = raw.header.take(None);
-                }
-
+                Self::drop_future(header);
                 Self::drop_ref(header);
 
                 if let Some(w) = awaiter {
@@ -650,12 +634,16 @@ mod new {
                 return false;
             }
 
-            raw.header.state = (state & !SCHEDULED) | RUNNING;
+            raw.header.state &= !SCHEDULED;
             state = raw.header.state;
 
+            let waker = ManuallyDrop::new(Waker::from_raw(Self::raw_waker(header.as_ptr() as _)));
+            let mut cx = Context::from_waker(&waker);
+
             let guard = Guard(header, PhantomData::<F>);
+
             let poll = match &mut raw.stage {
-                Stage::Polling(future) => Pin::new_unchecked(future).poll(cx),
+                Stage::Polling(future) => Pin::new_unchecked(future).poll(&mut cx),
                 _ => unreachable!(),
             };
 
@@ -663,23 +651,19 @@ mod new {
 
             match poll {
                 Poll::Ready(val) => {
-                    Self::drop_future(header);
                     raw.stage = Stage::Finished(val);
 
                     if state & TASK == 0 {
-                        raw.header.state = (state & !RUNNING & !SCHEDULED) | COMPLETED | CLOSED;
+                        raw.header.state = (state & !SCHEDULED) | COMPLETED | CLOSED;
                     } else {
-                        raw.header.state = (state & !RUNNING & !SCHEDULED) | COMPLETED;
+                        raw.header.state = (state & !SCHEDULED) | COMPLETED;
                     };
 
                     if state & TASK == 0 || state & CLOSED != 0 {
                         raw.stage = Stage::Dropped;
                     }
 
-                    let mut awaiter = None;
-                    if state & AWAITER != 0 {
-                        awaiter = raw.header.take(None);
-                    }
+                    let awaiter = raw.header.take_waker(None);
 
                     Self::drop_ref(header);
 
@@ -688,25 +672,11 @@ mod new {
                     }
                 }
                 Poll::Pending => {
-                    let mut future_dropped = false;
-
                     if state & CLOSED != 0 {
-                        raw.header.state = state & !RUNNING & !SCHEDULED;
-                    } else {
-                        raw.header.state = state & !RUNNING;
-                    };
+                        raw.header.state = state & !SCHEDULED;
+                        let awaiter = raw.header.take_waker(None);
 
-                    if state & CLOSED != 0 && !future_dropped {
                         Self::drop_future(header);
-                        future_dropped = true;
-                    }
-
-                    if state & CLOSED != 0 {
-                        let mut awaiter = None;
-                        if state & AWAITER != 0 {
-                            awaiter = raw.header.take(None);
-                        }
-
                         Self::drop_ref(header);
 
                         if let Some(w) = awaiter {
@@ -730,34 +700,23 @@ mod new {
                     unsafe {
                         let raw = RawTask::<F>::from_raw(self.0);
                         let header = NonNull::new_unchecked(&mut raw.header as *mut Header);
-                        let mut state = raw.header.state;
+                        let state = raw.header.state;
 
-                        loop {
-                            if state & CLOSED != 0 {
-                                RawTask::<F>::drop_future(header);
+                        if state & CLOSED != 0 {
+                            raw.header.state &= !SCHEDULED;
+                            let awaiter = raw.header.take_waker(None);
 
-                                raw.header.state &= !RUNNING & !SCHEDULED;
-
-                                let mut awaiter = None;
-                                if state & AWAITER != 0 {
-                                    awaiter = raw.header.take(None);
-                                }
-
-                                RawTask::<F>::drop_ref(header);
-
-                                if let Some(w) = awaiter {
-                                    w.wake();
-                                }
-                                break;
-                            }
-
-                            raw.header.state = (state & !RUNNING & !SCHEDULED) | CLOSED;
                             RawTask::<F>::drop_future(header);
-                            let mut awaiter = None;
-                            if state & AWAITER != 0 {
-                                awaiter = raw.header.take(None);
-                            }
+                            RawTask::<F>::drop_ref(header);
 
+                            if let Some(w) = awaiter {
+                                w.wake();
+                            }
+                        } else {
+                            raw.header.state = (state & !SCHEDULED) | CLOSED;
+                            let awaiter = raw.header.take_waker(None);
+
+                            RawTask::<F>::drop_future(header);
                             RawTask::<F>::drop_ref(header);
 
                             if let Some(w) = awaiter {
@@ -785,21 +744,11 @@ mod new {
             let header = NonNull::new_unchecked(ptr as *mut Header);
             let raw = Self::from_raw(header);
 
-            let state = raw.header.state;
-
-            if state & (COMPLETED | CLOSED) != 0 {
+            if raw.header.state & (COMPLETED | CLOSED) != 0 {
                 Self::drop_waker(ptr);
-                return;
-            }
-
-            if state & SCHEDULED == 0 {
-                raw.header.state = state | SCHEDULED;
-
-                if state & RUNNING == 0 {
-                    Self::schedule(header);
-                } else {
-                    Self::drop_waker(ptr);
-                }
+            } else if raw.header.state & SCHEDULED == 0 {
+                raw.header.state = raw.header.state | SCHEDULED;
+                Self::schedule(header);
             }
         }
 
@@ -807,23 +756,15 @@ mod new {
             let header = NonNull::new_unchecked(ptr as *mut Header);
             let raw = Self::from_raw(header);
 
-            let state = raw.header.state;
-            if state & (COMPLETED | CLOSED) != 0 {
+            if raw.header.state & (COMPLETED | CLOSED) != 0 {
                 return;
-            }
-
-            if state & SCHEDULED == 0 {
-                if state & RUNNING == 0 {
-                    raw.header.state = (state | SCHEDULED) + REFERENCE;
-
-                    if state > isize::MAX as usize {
-                        std::process::abort();
-                    }
-
-                    Self::schedule(header);
-                } else {
-                    raw.header.state = state | SCHEDULED;
+            } else if raw.header.state & SCHEDULED == 0 {
+                raw.header.state = (raw.header.state | SCHEDULED) + REFERENCE;
+                if raw.header.state > isize::MAX as usize {
+                    std::process::abort();
                 }
+
+                Self::schedule(header);
             }
         }
 
@@ -832,7 +773,6 @@ mod new {
             let raw = Self::from_raw(header);
 
             raw.header.state += REFERENCE;
-
             if raw.header.state > isize::MAX as usize {
                 std::process::abort();
             }
@@ -845,8 +785,8 @@ mod new {
             let raw = Self::from_raw(header);
 
             raw.header.state -= REFERENCE;
-            let state = raw.header.state;
 
+            let state = raw.header.state;
             if state & !(REFERENCE - 1) == 0 && state & TASK == 0 {
                 if state & (COMPLETED | CLOSED) == 0 {
                     raw.header.state = SCHEDULED | CLOSED | REFERENCE;
