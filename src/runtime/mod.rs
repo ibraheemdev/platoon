@@ -1,4 +1,5 @@
 pub(crate) mod core;
+pub(crate) mod new;
 
 use self::core::Core;
 use crate::task::JoinHandle;

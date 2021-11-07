@@ -18,7 +18,7 @@ use polling::{Event, Poller};
 
 #[derive(Clone)]
 pub struct Core {
-    shared: Rc<LocalCell<Shared>>,
+    pub(crate) shared: Rc<LocalCell<Shared>>,
 }
 
 pub struct Shared {
@@ -26,9 +26,10 @@ pub struct Shared {
     next_id: usize,
     poller: Poller,
     queue: VecDeque<Task>,
+    pub(crate) new_queue: VecDeque<super::new::Task>,
     events: Vec<Event>,
     woke_up: bool,
-    created_on: ThreadId,
+    pub(crate) created_on: ThreadId,
     alarms: BTreeMap<(Instant, usize), Waker>,
     sources: HashMap<usize, Source, BuildHasherDefault<util::UsizeHasher>>,
 }
@@ -36,6 +37,7 @@ pub struct Shared {
 const POLLS_PER_TICK: usize = 61;
 const INITIAL_SOURCES: usize = 64;
 const INITIAL_TASKS: usize = 64;
+const INITIAL_EVENTS: usize = 1024;
 
 impl Core {
     pub fn new() -> io::Result<Self> {
@@ -45,7 +47,8 @@ impl Core {
                 next_id: 0,
                 poller: Poller::new()?,
                 queue: VecDeque::with_capacity(INITIAL_TASKS),
-                events: Vec::new(),
+                new_queue: VecDeque::with_capacity(INITIAL_TASKS),
+                events: Vec::with_capacity(INITIAL_EVENTS),
                 woke_up: false,
                 created_on: thread::current().id(),
                 alarms: BTreeMap::new(),
@@ -174,7 +177,7 @@ impl Core {
     where
         F: Future + 'static,
     {
-        Task::spawn(self.clone(), Box::pin(future))
+        Task::spawn(self.clone(), future)
     }
 
     pub fn block_on<F>(&self, mut future: F) -> F::Output
@@ -582,7 +585,9 @@ impl<F: Future> RawTask<F> {
 
         if raw.header.state & (COMPLETED | CLOSED) != 0 {
             Self::drop_waker(ptr);
-        } else if raw.header.state & SCHEDULED == 0 {
+        } else if raw.header.state & SCHEDULED != 0 {
+            Self::drop_waker(ptr);
+        } else {
             raw.header.state = raw.header.state | SCHEDULED;
             Self::schedule(header);
         }
@@ -714,13 +719,13 @@ impl Task {
 }
 
 struct RawTaskVTable {
-    pub(crate) schedule: unsafe fn(NonNull<Header>),
-    pub(crate) drop_future: unsafe fn(NonNull<Header>),
-    pub(crate) get_output: unsafe fn(NonNull<Header>, *mut ()),
-    pub(crate) drop_ref: unsafe fn(ptr: NonNull<Header>),
-    pub(crate) destroy: unsafe fn(NonNull<Header>),
-    pub(crate) run: unsafe fn(NonNull<Header>) -> bool,
-    pub(crate) clone_waker: unsafe fn(*const ()) -> RawWaker,
+    schedule: unsafe fn(NonNull<Header>),
+    drop_future: unsafe fn(NonNull<Header>),
+    get_output: unsafe fn(NonNull<Header>, *mut ()),
+    drop_ref: unsafe fn(ptr: NonNull<Header>),
+    destroy: unsafe fn(NonNull<Header>),
+    run: unsafe fn(NonNull<Header>) -> bool,
+    clone_waker: unsafe fn(*const ()) -> RawWaker,
 }
 
 /// # Safety
@@ -733,6 +738,10 @@ pub unsafe trait RcWake: 'static {
 
     fn wake_by_ref(self: &Rc<Self>) {
         self.clone().wake()
+    }
+
+    fn drop(self: Rc<Self>) {
+        let _ = self;
     }
 
     fn into_waker(self: Rc<Self>) -> Waker
@@ -771,7 +780,7 @@ pub unsafe trait RcWake: 'static {
         unsafe fn drop<W: RcWake>(waker: *const ()) {
             let waker = unsafe { Rc::from_raw(waker as *const W) };
             assert_not_sent(&waker);
-            let _ = waker;
+            W::drop(waker);
         }
 
         let raw = RawWaker::new(
