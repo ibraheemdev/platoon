@@ -9,15 +9,13 @@ fn main() {
         let tcp_listener = TcpListener::bind(addr).await.unwrap();
         loop {
             let tcp_stream = tcp_listener.accept().await.unwrap();
+
             smoller::task::spawn(async move {
-                if let Err(http_err) = Http::new()
+                let _ = Http::new()
                     .http1_only(true)
                     .http1_keep_alive(true)
                     .serve_connection(compat::HyperStream(tcp_stream), service_fn(hello))
-                    .await
-                {
-                    eprintln!("Error while serving HTTP connection: {}", http_err);
-                }
+                    .await;
             });
         }
     })

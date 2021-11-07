@@ -14,8 +14,20 @@ where
 }
 
 pub struct JoinHandle<T> {
-    pub(crate) task: Task,
-    pub(crate) _t: PhantomData<T>,
+    task: Task,
+    _t: PhantomData<T>,
+}
+
+impl<T> JoinHandle<T> {
+    /// # Safety
+    ///
+    /// `T` must be the return type of the spawned future.
+    pub(crate) unsafe fn new(task: Task) -> JoinHandle<T> {
+        JoinHandle {
+            task,
+            _t: PhantomData,
+        }
+    }
 }
 
 impl<T> Unpin for JoinHandle<T> {}
@@ -24,8 +36,6 @@ impl<T> Future for JoinHandle<T> {
     type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.task)
-            .poll(cx)
-            .map(|ptr| unsafe { *Box::from_raw(ptr as *mut T) })
+        unsafe { Pin::new(&mut self.task).poll::<T>(cx) }
     }
 }

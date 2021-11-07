@@ -47,10 +47,7 @@ impl Runtime {
     where
         F: Future + 'static,
     {
-        JoinHandle {
-            task: self.core.spawn(future),
-            _t: PhantomData,
-        }
+        unsafe { JoinHandle::new(self.core.spawn(future)) }
     }
 
     pub fn block_on<F>(&self, future: F) -> F::Output
