@@ -22,7 +22,7 @@ impl Poller {
         syscall!(epoll_ctl(self.fd, EPOLL_CTL_ADD, fd, &mut event as _)).map(drop)
     }
 
-    pub fn modify(&self, fd: RawFd, event: Event) -> io::Result<()> {
+    pub fn update(&self, fd: RawFd, event: Event) -> io::Result<()> {
         let mut event = event.into();
         syscall!(epoll_ctl(self.fd, EPOLL_CTL_MOD, fd, &mut event as _)).map(drop)
     }
