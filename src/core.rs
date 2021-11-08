@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::hash::BuildHasherDefault;
 use std::mem::ManuallyDrop;
-use std::os::unix::prelude::RawFd;
+use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -12,7 +12,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 use std::{io, mem};
 
-use polling::{Event, Poller};
+use crate::sys::{Event, Poller, SysEvent};
 
 #[derive(Clone)]
 pub struct Core {
@@ -24,7 +24,7 @@ struct Shared {
     next_id: usize,
     poller: Poller,
     queue: VecDeque<Task>,
-    events: Vec<Event>,
+    events: Vec<SysEvent>,
     woke_up: bool,
     created_on: ThreadId,
     alarms: BTreeMap<(Instant, usize), Waker>,
@@ -57,7 +57,13 @@ impl Core {
         unsafe {
             self.shared.with(|shared| {
                 let key = shared.sources.len();
-                shared.poller.add(raw, polling::Event::none(key))?;
+                shared.poller.add(
+                    raw,
+                    Event {
+                        key,
+                        ..Default::default()
+                    },
+                )?;
                 shared.sources.insert(
                     key,
                     Source {
@@ -131,10 +137,10 @@ impl Core {
         poll
     }
 
-    fn modify_source(poller: &polling::Poller, source: &Source) -> io::Result<()> {
+    fn modify_source(poller: &Poller, source: &Source) -> io::Result<()> {
         poller.modify(
             source.raw,
-            polling::Event {
+            Event {
                 key: source.key,
                 readable: source.read.has_interest(),
                 writable: source.write.has_interest(),
@@ -298,10 +304,10 @@ impl Shared {
 
         let timeout = timeout(next_timer);
 
-        match self.poller.wait(&mut self.events, timeout) {
+        match self.poller.poll(&mut self.events, timeout) {
             Ok(0) => {}
             Ok(_) => {
-                for e in self.events.iter() {
+                for e in self.events.iter().map(Event::from) {
                     if let Some(source) = self.sources.get_mut(&e.key) {
                         if e.readable {
                             source.read.take(&mut wakers, self.tick);

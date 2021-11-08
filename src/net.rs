@@ -1,6 +1,6 @@
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::SocketAddr;
-use std::os::unix::prelude::AsRawFd;
+use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 

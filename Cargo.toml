@@ -6,9 +6,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-polling = "2.1.0"
 futures-io = "0.3.17"
 pin-project-lite = "0.2.7"
+libc = "0.2.107"
 
 [dev-dependencies]
 hyper = { version = "0.14.14", features = ["full"] }
