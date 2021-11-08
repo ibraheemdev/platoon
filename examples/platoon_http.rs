@@ -1,6 +1,9 @@
-use hyper::{server::conn::Http, service::service_fn, Body, Request, Response};
+use std::convert::Infallible;
+use std::net::SocketAddr;
+
+use hyper::server::conn::Http;
+use hyper::{service, Body, Request, Response};
 use platoon::net::TcpListener;
-use std::{convert::Infallible, net::SocketAddr};
 
 fn main() {
     platoon::block_on(async move {
@@ -14,7 +17,7 @@ fn main() {
                 let _ = Http::new()
                     .http1_only(true)
                     .http1_keep_alive(true)
-                    .serve_connection(compat::HyperStream(tcp_stream), service_fn(hello))
+                    .serve_connection(compat::HyperStream(tcp_stream), service::service_fn(hello))
                     .await;
             });
         }

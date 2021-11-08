@@ -26,8 +26,6 @@ where
     PollFn(f).await
 }
 
-pub const NO_RUNTIME: &str = "must be called within the context of the Platoon runtime";
-
 #[derive(Default)]
 pub struct UsizeHasher(usize);
 
@@ -98,4 +96,8 @@ impl<T> LocalCell<T> {
 
         val
     }
+}
+
+pub mod err {
+    pub const NO_RUNTIME: &str = "must be called within the context of the Platoon runtime";
 }

@@ -1,10 +1,10 @@
+use crate::{util, Runtime};
+
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
-
-use crate::{util, Runtime};
 
 pub fn sleep(duration: Duration) -> Sleep {
     sleep_until(Instant::now() + duration)
@@ -14,7 +14,7 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
     Sleep {
         deadline,
         alarm: None,
-        runtime: Runtime::current().expect(util::NO_RUNTIME),
+        runtime: Runtime::current().expect(util::err::NO_RUNTIME),
     }
 }
 

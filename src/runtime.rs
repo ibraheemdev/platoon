@@ -1,6 +1,4 @@
-pub(crate) mod core;
-
-use self::core::Core;
+use crate::core::Core;
 use crate::task::JoinHandle;
 
 use std::cell::RefCell;
