@@ -1,16 +1,16 @@
 use hyper::{server::conn::Http, service::service_fn, Body, Request, Response};
-use smoller::net::TcpListener;
+use platoon::net::TcpListener;
 use std::{convert::Infallible, net::SocketAddr};
 
 fn main() {
-    smoller::block_on(async move {
+    platoon::block_on(async move {
         let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
 
         let tcp_listener = TcpListener::bind(addr).await.unwrap();
         loop {
             let tcp_stream = tcp_listener.accept().await.unwrap();
 
-            smoller::task::spawn(async move {
+            platoon::spawn(async move {
                 let _ = Http::new()
                     .http1_only(true)
                     .http1_keep_alive(true)
@@ -31,7 +31,7 @@ pub mod compat {
     use std::task::{Context, Poll};
 
     use futures::{AsyncRead, AsyncWrite};
-    use smoller::net::TcpStream;
+    use platoon::net::TcpStream;
     use tokio::io::ReadBuf;
 
     pub struct HyperStream(pub TcpStream);
