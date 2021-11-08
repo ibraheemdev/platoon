@@ -28,7 +28,7 @@ async fn hello(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
     Ok(Response::new(Body::from("Hello World!")))
 }
 
-pub mod compat {
+mod compat {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 

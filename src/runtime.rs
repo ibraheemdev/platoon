@@ -43,6 +43,7 @@ impl Runtime {
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
+        F::Output: 'static,
     {
         unsafe { JoinHandle::new(self.core.spawn(future)) }
     }

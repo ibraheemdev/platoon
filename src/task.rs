@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + 'static,
+    F::Output: 'static,
 {
     Runtime::current()
         .expect(util::err::NO_RUNTIME)
@@ -21,9 +22,7 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> JoinHandle<T> {
-    /// # Safety
-    ///
-    /// `T` must be the return type of the spawned future.
+    /// Safety: `T` must be the return type of the spawned future.
     pub(crate) unsafe fn new(task: Task) -> JoinHandle<T> {
         JoinHandle {
             task,
@@ -44,4 +43,24 @@ impl<T> Future for JoinHandle<T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe { Pin::new(&mut self.task).poll::<T>(cx) }
     }
+}
+
+pub async fn yield_now() {
+    struct YieldNow(bool);
+
+    impl Future for YieldNow {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    YieldNow(false).await
 }

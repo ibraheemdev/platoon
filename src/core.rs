@@ -181,6 +181,7 @@ impl Core {
     pub fn spawn<F>(&self, future: F) -> Task
     where
         F: Future + 'static,
+        F::Output: 'static,
     {
         let task = Task {
             raw: Rc::new(LocalCell::new(TaskRepr {
