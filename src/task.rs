@@ -28,6 +28,10 @@ impl<T> JoinHandle<T> {
             _t: PhantomData,
         }
     }
+
+    pub fn cancel(self) -> Option<T> {
+        unsafe { self.task.cancel::<T>() }
+    }
 }
 
 impl<T> Unpin for JoinHandle<T> {}
@@ -36,10 +40,6 @@ impl<T> Future for JoinHandle<T> {
     type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe {
-            Pin::new(&mut self.task)
-                .poll::<T>(cx)
-                .map(|val| val.expect("task was cancelled"))
-        }
+        unsafe { Pin::new(&mut self.task).poll::<T>(cx) }
     }
 }

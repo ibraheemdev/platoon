@@ -58,7 +58,7 @@ pub fn wake(waker: Waker) {
     }
 }
 
-pub struct LocalCell<T> {
+pub struct LocalCell<T: ?Sized> {
     value: UnsafeCell<T>,
 }
 

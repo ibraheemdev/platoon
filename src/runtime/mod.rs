@@ -1,5 +1,4 @@
 pub(crate) mod core;
-pub(crate) mod new;
 
 use self::core::Core;
 use crate::task::JoinHandle;
@@ -7,7 +6,6 @@ use crate::task::JoinHandle;
 use std::cell::RefCell;
 use std::future::Future;
 use std::io;
-use std::marker::PhantomData;
 
 thread_local! {
     static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);

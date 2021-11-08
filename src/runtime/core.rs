@@ -3,11 +3,9 @@ use crate::util::{self, LocalCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::hash::BuildHasherDefault;
-use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
-use std::ptr::NonNull;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread::{self, ThreadId};
@@ -18,18 +16,17 @@ use polling::{Event, Poller};
 
 #[derive(Clone)]
 pub struct Core {
-    pub(crate) shared: Rc<LocalCell<Shared>>,
+    shared: Rc<LocalCell<Shared>>,
 }
 
-pub struct Shared {
+struct Shared {
     tick: usize,
     next_id: usize,
     poller: Poller,
     queue: VecDeque<Task>,
-    pub(crate) new_queue: VecDeque<super::new::Task>,
     events: Vec<Event>,
     woke_up: bool,
-    pub(crate) created_on: ThreadId,
+    created_on: ThreadId,
     alarms: BTreeMap<(Instant, usize), Waker>,
     sources: HashMap<usize, Source, BuildHasherDefault<util::UsizeHasher>>,
 }
@@ -47,7 +44,6 @@ impl Core {
                 next_id: 0,
                 poller: Poller::new()?,
                 queue: VecDeque::with_capacity(INITIAL_TASKS),
-                new_queue: VecDeque::with_capacity(INITIAL_TASKS),
                 events: Vec::with_capacity(INITIAL_EVENTS),
                 woke_up: false,
                 created_on: thread::current().id(),
@@ -177,7 +173,20 @@ impl Core {
     where
         F: Future + 'static,
     {
-        Task::spawn(self.clone(), future)
+        let task = Task {
+            raw: Rc::new(LocalCell::new(TaskRepr {
+                core: self.clone(),
+                awaiter: None,
+                state: State::Scheduled(future),
+            })),
+        };
+
+        unsafe {
+            self.shared
+                .with(|shared| shared.queue.push_back(task.clone()));
+        }
+
+        task
     }
 
     pub fn block_on<F>(&self, mut future: F) -> F::Output
@@ -205,7 +214,7 @@ impl Core {
                     for _ in 0..POLLS_PER_TICK {
                         match shared.queue.pop_front() {
                             Some(task) => {
-                                task.run();
+                                task.raw.run();
                             }
                             None => {
                                 // there are no tasks to run, so
@@ -237,7 +246,7 @@ impl Core {
 }
 
 impl Shared {
-    pub fn take_past_alarms(&mut self, wakers: &mut Vec<Waker>) -> Option<Duration> {
+    fn take_past_alarms(&mut self, wakers: &mut Vec<Waker>) -> Option<Duration> {
         let now = Instant::now();
 
         let later = self.alarms.split_off(&(now, 0));
@@ -318,7 +327,7 @@ unsafe impl RcWake for LocalCell<Shared> {
     }
 }
 
-pub struct Source {
+struct Source {
     raw: RawFd,
     key: usize,
     read: Interest,
@@ -370,369 +379,145 @@ impl Interest {
     }
 }
 
-const SCHEDULED: usize = 1 << 0;
-const COMPLETED: usize = 1 << 1;
-const CLOSED: usize = 1 << 2;
-const TASK: usize = 1 << 3;
-const REFERENCE: usize = 1 << 4;
-
-//TODO: waker thread safe
-struct Header {
-    state: usize,
-    awaiter: Option<Waker>,
-    vtable: &'static RawTaskVTable,
+trait RawTask {
+    fn run(self: Rc<Self>);
+    /// Safety: `out` must be a valid `*mut Poll<F::Output>`
+    unsafe fn poll(&self, cx: &mut Context<'_>, out: *mut ());
+    /// Safety: `out` must be a valid `*mut Option<F::Output>`
+    unsafe fn cancel(self: Rc<Self>, out: *mut ());
 }
 
-impl Header {
-    fn take_waker(&mut self, current: Option<&Waker>) -> Option<Waker> {
-        if let Some(w) = self.awaiter.take() {
-            match current {
-                None => return Some(w),
-                Some(c) if !w.will_wake(c) => return Some(w),
-                Some(_) => drop(w),
-            }
-        }
-
-        None
-    }
-
-    pub(crate) fn notify(&mut self, current: Option<&Waker>) {
-        if let Some(w) = self.take_waker(current) {
-            w.wake()
-        }
-    }
-}
-
-struct RawTask<F: Future> {
-    header: Header,
-    stage: Stage<F>,
-    core: super::Core,
-}
-
-impl<F: Future> RawTask<F> {
-    unsafe fn from_raw<'a>(header: NonNull<Header>) -> &'a mut Self {
-        header.cast::<Self>().as_mut()
-    }
-
-    unsafe fn schedule(header: NonNull<Header>) {
-        let raw = Self::from_raw(header);
-        raw.core.shared.with(|shared| {
-            shared.queue.push_back(Task { header });
-        })
-    }
-
-    unsafe fn drop_future(header: NonNull<Header>) {
-        let raw = Self::from_raw(header);
-        if let Stage::Polling(_) = raw.stage {
-            raw.stage = Stage::Dropped;
-        }
-    }
-
-    unsafe fn get_output(header: NonNull<Header>, dst: *mut ()) {
-        let raw = Self::from_raw(header);
-
-        let output = match mem::replace(&mut raw.stage, Stage::Dropped) {
-            Stage::Finished(output) => output,
-            // TODO: drop guard?
-            _ => panic!("JoinHandle polled after completion"),
-        };
-
-        *(dst as *mut Option<F::Output>) = Some(output);
-    }
-
-    unsafe fn drop_ref(header: NonNull<Header>) {
-        let raw = Self::from_raw(header);
-        raw.header.state -= REFERENCE;
-
-        if raw.header.state & !(REFERENCE - 1) == 0 && raw.header.state & TASK == 0 {
-            Self::destroy(header);
-        }
-    }
-
-    unsafe fn destroy(header: NonNull<Header>) {
-        let _ = Box::from_raw(Self::from_raw(header) as *mut _);
-    }
-
-    unsafe fn run(header: NonNull<Header>) -> bool {
-        let raw = Self::from_raw(header);
-
-        let mut state = raw.header.state;
-
-        if state & CLOSED != 0 {
-            raw.header.state &= !SCHEDULED;
-            let awaiter = raw.header.take_waker(None);
-
-            Self::drop_future(header);
-            Self::drop_ref(header);
-
-            if let Some(w) = awaiter {
-                w.wake();
-            }
-
-            return false;
-        }
-
-        raw.header.state &= !SCHEDULED;
-        state = raw.header.state;
-
-        let waker = ManuallyDrop::new(Waker::from_raw(Self::raw_waker(header.as_ptr() as _)));
-        let mut cx = Context::from_waker(&waker);
-
-        let guard = Guard(header, PhantomData::<F>);
-
-        let poll = match &mut raw.stage {
-            Stage::Polling(future) => Pin::new_unchecked(future).poll(&mut cx),
-            Stage::Finished(_) => unreachable!(),
-            Stage::Dropped => unreachable!(),
-        };
-
-        mem::forget(guard);
-
-        match poll {
-            Poll::Ready(val) => {
-                raw.stage = Stage::Finished(val);
-
-                if state & TASK == 0 {
-                    raw.header.state = (state & !SCHEDULED) | COMPLETED | CLOSED;
-                } else {
-                    raw.header.state = (state & !SCHEDULED) | COMPLETED;
-                };
-
-                if state & TASK == 0 || state & CLOSED != 0 {
-                    raw.stage = Stage::Dropped;
-                }
-
-                let awaiter = raw.header.take_waker(None);
-
-                Self::drop_ref(header);
-
-                if let Some(w) = awaiter {
-                    w.wake();
-                }
-            }
-            Poll::Pending => {
-                if state & CLOSED != 0 {
-                    raw.header.state = state & !SCHEDULED;
-                    let awaiter = raw.header.take_waker(None);
-
-                    Self::drop_future(header);
-                    Self::drop_ref(header);
-
-                    if let Some(w) = awaiter {
-                        w.wake();
-                    }
-                } else if state & SCHEDULED != 0 {
-                    Self::schedule(header);
-                    return true;
-                } else {
-                    Self::drop_ref(header);
-                }
-            }
-        }
-
-        return false;
-
-        struct Guard<F: Future>(NonNull<Header>, PhantomData<F>);
-
-        impl<F: Future> Drop for Guard<F> {
-            fn drop(&mut self) {
-                unsafe {
-                    let raw = RawTask::<F>::from_raw(self.0);
-                    let header = NonNull::new_unchecked(&mut raw.header as *mut Header);
-                    let state = raw.header.state;
-
-                    if state & CLOSED != 0 {
-                        raw.header.state &= !SCHEDULED;
-                        let awaiter = raw.header.take_waker(None);
-
-                        RawTask::<F>::drop_future(header);
-                        RawTask::<F>::drop_ref(header);
-
-                        if let Some(w) = awaiter {
-                            w.wake();
-                        }
-                    } else {
-                        raw.header.state = (state & !SCHEDULED) | CLOSED;
-                        let awaiter = raw.header.take_waker(None);
-
-                        RawTask::<F>::drop_future(header);
-                        RawTask::<F>::drop_ref(header);
-
-                        if let Some(w) = awaiter {
-                            w.wake();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn raw_waker(ptr: *const ()) -> RawWaker {
-        RawWaker::new(
-            ptr,
-            &RawWakerVTable::new(
-                Self::clone_waker,
-                Self::wake,
-                Self::wake_by_ref,
-                Self::drop_waker,
-            ),
-        )
-    }
-
-    unsafe fn wake(ptr: *const ()) {
-        let header = NonNull::new_unchecked(ptr as *mut Header);
-        let raw = Self::from_raw(header);
-
-        if raw.header.state & (COMPLETED | CLOSED) != 0 {
-            Self::drop_waker(ptr);
-        } else if raw.header.state & SCHEDULED != 0 {
-            Self::drop_waker(ptr);
-        } else {
-            raw.header.state = raw.header.state | SCHEDULED;
-            Self::schedule(header);
-        }
-    }
-
-    unsafe fn wake_by_ref(ptr: *const ()) {
-        let header = NonNull::new_unchecked(ptr as *mut Header);
-        let raw = Self::from_raw(header);
-
-        if raw.header.state & (COMPLETED | CLOSED) != 0 {
-            return;
-        } else if raw.header.state & SCHEDULED == 0 {
-            raw.header.state = (raw.header.state | SCHEDULED) + REFERENCE;
-            if raw.header.state > isize::MAX as usize {
-                std::process::abort();
-            }
-
-            Self::schedule(header);
-        }
-    }
-
-    unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
-        let header = NonNull::new_unchecked(ptr as *mut Header);
-        let raw = Self::from_raw(header);
-
-        raw.header.state += REFERENCE;
-        if raw.header.state > isize::MAX as usize {
-            std::process::abort();
-        }
-
-        Self::raw_waker(ptr)
-    }
-
-    unsafe fn drop_waker(ptr: *const ()) {
-        let header = NonNull::new_unchecked(ptr as *mut Header);
-        let raw = Self::from_raw(header);
-
-        raw.header.state -= REFERENCE;
-
-        let state = raw.header.state;
-        if state & !(REFERENCE - 1) == 0 && state & TASK == 0 {
-            if state & (COMPLETED | CLOSED) == 0 {
-                raw.header.state = SCHEDULED | CLOSED | REFERENCE;
-                Self::schedule(header);
-            } else {
-                Self::destroy(header);
-            }
-        }
-    }
-}
-
-enum Stage<F: Future> {
-    Polling(F),
-    Finished(F::Output),
-    Dropped,
-}
-
+#[derive(Clone)]
 pub struct Task {
-    header: NonNull<Header>,
+    raw: Rc<dyn RawTask>,
 }
 
 impl Task {
-    fn spawn<F>(core: super::Core, future: F) -> Task
-    where
-        F: Future + 'static,
-    {
-        let boxed = Box::new(RawTask {
-            header: Header {
-                state: SCHEDULED | TASK | REFERENCE,
-                awaiter: None,
-                vtable: &RawTaskVTable {
-                    schedule: RawTask::<F>::schedule,
-                    drop_future: RawTask::<F>::drop_future,
-                    get_output: RawTask::<F>::get_output,
-                    drop_ref: RawTask::<F>::drop_ref,
-                    destroy: RawTask::<F>::destroy,
-                    run: RawTask::<F>::run,
-                    clone_waker: RawTask::<F>::clone_waker,
-                },
-            },
-            core,
-            stage: Stage::Polling(future),
-        });
-
-        let header = unsafe { NonNull::new_unchecked(Box::into_raw(boxed) as *mut Header) };
-        unsafe {
-            RawTask::<F>::schedule(header);
-        }
-
-        Task { header }
+    pub unsafe fn poll<T>(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let mut out: Poll<T> = Poll::Pending;
+        self.raw.poll(cx, &mut out as *mut _ as *mut _);
+        out
     }
 
-    fn run(self) {
-        unsafe {
-            (self.header.as_ref().vtable.run)(self.header);
-        }
+    pub unsafe fn cancel<T>(self) -> Option<T> {
+        let mut out: Option<T> = None;
+        self.raw.cancel(&mut out as *mut _ as *mut _);
+        out
     }
+}
 
-    pub(crate) unsafe fn poll<T>(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+struct TaskRepr<F: Future> {
+    core: Core,
+    awaiter: Option<Waker>,
+    state: State<F>,
+}
+
+enum State<F: Future> {
+    Idle(F),
+    Scheduled(F),
+    Complete(F::Output),
+    Took,
+}
+
+impl<F: Future> State<F> {
+    fn take(&mut self) -> Self {
+        mem::replace(self, Self::Took)
+    }
+}
+
+impl<F: Future + 'static> RawTask for LocalCell<TaskRepr<F>> {
+    unsafe fn poll(&self, cx: &mut Context<'_>, out: *mut ()) {
         unsafe {
-            let header = self.header.as_mut();
-            let state = header.state;
-
-            loop {
-                if state & CLOSED != 0 {
-                    if state & (SCHEDULED) != 0 {
-                        header.awaiter.replace(cx.waker().clone());
-                        return Poll::Pending;
+            self.with(|task| match task.state {
+                State::Complete(_) => match task.state.take() {
+                    State::Complete(val) => {
+                        *(out as *mut Poll<F::Output>) = Poll::Ready(val);
                     }
-
-                    header.notify(Some(cx.waker()));
-                    return Poll::Ready(None);
+                    _ => unsafe { std::hint::unreachable_unchecked() },
+                },
+                State::Took => {
+                    panic!("JoinHandle polled after completion")
                 }
-
-                if state & COMPLETED == 0 {
-                    header.awaiter.replace(cx.waker().clone());
-                    return Poll::Pending;
+                _ => {
+                    task.awaiter.replace(cx.waker().clone());
                 }
+            })
+        }
+    }
 
-                header.state = state | CLOSED;
-                header.notify(Some(cx.waker()));
+    fn run(self: Rc<Self>) {
+        unsafe {
+            // make sure we don't hold the borrow when polling
+            let state = self.with(|task| task.state.take());
 
-                let mut output: Option<T> = None;
-                (header.vtable.get_output)(self.header, &mut output as *mut Option<T> as *mut ());
-                return Poll::Ready(output);
+            let waker = self.clone().into_waker();
+            let mut cx = Context::from_waker(&waker);
+            match state {
+                State::Scheduled(mut future) => {
+                    let poll = Pin::new_unchecked(&mut future).poll(&mut cx);
+
+                    // make sure we don't hold the borrow when waking
+                    let waker = self.with(|task| match poll {
+                        Poll::Ready(val) => {
+                            task.state = State::Complete(val);
+                            task.awaiter.take()
+                        }
+                        Poll::Pending => {
+                            task.state = State::Idle(future);
+                            None
+                        }
+                    });
+
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                }
+                State::Took => {}
+                _ => unreachable!(),
             }
+        }
+    }
+
+    unsafe fn cancel(self: Rc<Self>, out: *mut ()) {
+        unsafe {
+            self.with(|task| match task.state.take() {
+                State::Complete(val) => {
+                    *(out as *mut Option<F::Output>) = Some(val);
+                }
+                _ => {}
+            })
         }
     }
 }
 
-struct RawTaskVTable {
-    schedule: unsafe fn(NonNull<Header>),
-    drop_future: unsafe fn(NonNull<Header>),
-    get_output: unsafe fn(NonNull<Header>, *mut ()),
-    drop_ref: unsafe fn(ptr: NonNull<Header>),
-    destroy: unsafe fn(NonNull<Header>),
-    run: unsafe fn(NonNull<Header>) -> bool,
-    clone_waker: unsafe fn(*const ()) -> RawWaker,
+unsafe impl<F: Future + 'static> RcWake for LocalCell<TaskRepr<F>> {
+    fn wake(self: Rc<Self>) {
+        unsafe {
+            self.with(|task| match task.state.take() {
+                State::Idle(future) => {
+                    task.state = State::Scheduled(future);
+                    unsafe {
+                        task.core.shared.with(|shared| {
+                            shared.queue.push_back(Task { raw: self.clone() });
+                        })
+                    }
+                }
+                state => {
+                    task.state = state;
+                }
+            })
+        }
+    }
+
+    fn created_on(&self) -> ThreadId {
+        unsafe { self.with(|task| task.core.shared.with(|shared| shared.created_on)) }
+    }
 }
 
 /// # Safety
 ///
-/// `created_on` must return the `ThreadId` of thread that the
-/// waker was created on.
-pub unsafe trait RcWake: 'static {
+/// `created_on` must return the id of thread that the waker was created on.
+unsafe trait RcWake: 'static {
     fn wake(self: Rc<Self>);
     fn created_on(&self) -> ThreadId;
 
@@ -740,15 +525,11 @@ pub unsafe trait RcWake: 'static {
         self.clone().wake()
     }
 
-    fn drop(self: Rc<Self>) {
-        let _ = self;
-    }
-
     fn into_waker(self: Rc<Self>) -> Waker
     where
         Self: Sized,
     {
-        unsafe fn assert_not_sent(waker: &Rc<impl RcWake>) {
+        fn assert_not_sent(waker: &Rc<impl RcWake>) {
             if thread::current().id() != waker.created_on() {
                 panic!("cannot use waker from outside the thread it was created on");
             }
@@ -780,7 +561,7 @@ pub unsafe trait RcWake: 'static {
         unsafe fn drop<W: RcWake>(waker: *const ()) {
             let waker = unsafe { Rc::from_raw(waker as *const W) };
             assert_not_sent(&waker);
-            W::drop(waker);
+            let _ = waker;
         }
 
         let raw = RawWaker::new(
