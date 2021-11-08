@@ -32,7 +32,7 @@ mod compat {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    use futures::{AsyncRead, AsyncWrite};
+    use futures_io::{AsyncRead, AsyncWrite};
     use platoon::net::TcpStream;
     use tokio::io::ReadBuf;
 

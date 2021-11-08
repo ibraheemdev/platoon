@@ -90,7 +90,7 @@ impl TcpStream {
     }
 }
 
-impl futures::AsyncRead for TcpStream {
+impl futures_io::AsyncRead for TcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -130,7 +130,7 @@ impl futures::AsyncRead for TcpStream {
     }
 }
 
-impl futures::AsyncWrite for TcpStream {
+impl futures_io::AsyncWrite for TcpStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
