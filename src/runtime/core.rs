@@ -87,7 +87,9 @@ impl Core {
         direction: Direction,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        unsafe {
+        let mut to_wake = None;
+
+        let poll = unsafe {
             self.shared.with(|shared| {
                 let source = unsafe { shared.sources.get_mut(&key).unwrap() };
                 let interest = source.interest(direction);
@@ -107,7 +109,7 @@ impl Core {
                         return Poll::Pending;
                     }
 
-                    util::wake(waker);
+                    to_wake = Some(waker);
                 }
 
                 interest.poller = Some(cx.waker().clone());
@@ -119,7 +121,14 @@ impl Core {
 
                 Poll::Pending
             })
+        };
+
+        // we have to wake after we release the borrow
+        if let Some(waker) = to_wake {
+            util::wake(waker);
         }
+
+        poll
     }
 
     fn modify_source(poller: &polling::Poller, source: &Source) -> io::Result<()> {
@@ -198,49 +207,57 @@ impl Core {
         let mut cx = Context::from_waker(&waker);
 
         unsafe {
-            self.shared.with(|shared| {
-                // make sure the main future is polled
-                // on the first iteration of 'run
-                shared.woke_up = true;
+            // make sure the main future is polled
+            // on the first iteration of 'run
+            self.shared.with(|s| {
+                s.woke_up = true;
+            });
 
-                'block_on: loop {
-                    if shared.woke_up {
-                        shared.woke_up = false;
-                        if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
-                            return val;
-                        }
+            'block_on: loop {
+                if self.shared.with(|s| s.woke_up) {
+                    self.shared.with(|s| s.woke_up = false);
+                    if let Poll::Ready(val) = future.as_mut().poll(&mut cx) {
+                        return val;
                     }
+                }
 
-                    for _ in 0..POLLS_PER_TICK {
-                        match shared.queue.pop_front() {
-                            Some(task) => {
-                                task.raw.run();
-                            }
-                            None => {
-                                // there are no tasks to run, so
-                                // just park until the next timer
-                                // or IO event
-                                shared
-                                    .drive_io(|next_timer| next_timer)
-                                    .ok()
-                                    .expect("failed to drive IO");
-                                continue 'block_on;
-                            }
+                for _ in 0..POLLS_PER_TICK {
+                    match self.shared.with(|s| s.queue.pop_front()) {
+                        Some(task) => {
+                            task.raw.run();
                         }
-
-                        // polling this task woke up the main
-                        // future
-                        if shared.woke_up {
+                        None => {
+                            // there are no tasks to run, so
+                            // just park until the next timer
+                            // or IO event
+                            self.shared
+                                .with(|s| {
+                                    s.drive_io(|next_timer| next_timer)
+                                        .ok()
+                                        .expect("failed to drive IO")
+                                })
+                                .into_iter()
+                                .for_each(util::wake);
                             continue 'block_on;
                         }
                     }
 
-                    shared
-                        .drive_io(|_| Some(Duration::from_millis(0)))
-                        .ok()
-                        .expect("failed to drive IO");
+                    // polling this task woke up the main
+                    // future
+                    if self.shared.with(|s| s.woke_up) {
+                        continue 'block_on;
+                    }
                 }
-            })
+
+                self.shared
+                    .with(|s| {
+                        s.drive_io(|_| Some(Duration::from_millis(0)))
+                            .ok()
+                            .expect("failed to drive IO")
+                    })
+                    .into_iter()
+                    .for_each(util::wake);
+            }
         }
     }
 }
@@ -271,7 +288,7 @@ impl Shared {
     fn drive_io(
         &mut self,
         timeout: impl Fn(Option<Duration>) -> Option<Duration>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<Waker>> {
         self.tick += 1;
 
         self.events.clear();
@@ -305,11 +322,9 @@ impl Shared {
             Err(err) => return Err(err),
         }
 
-        for waker in wakers {
-            util::wake(waker);
-        }
-
-        Ok(())
+        // we can't wake the wakers here, because
+        // we are in a mutable borrow
+        Ok(wakers)
     }
 }
 
@@ -384,7 +399,7 @@ trait RawTask {
     /// Safety: `out` must be a valid `*mut Poll<F::Output>`
     unsafe fn poll(&self, cx: &mut Context<'_>, out: *mut ());
     /// Safety: `out` must be a valid `*mut Option<F::Output>`
-    unsafe fn cancel(self: Rc<Self>, out: *mut ());
+    unsafe fn cancel(&self, out: *mut ());
 }
 
 #[derive(Clone)]
@@ -419,13 +434,19 @@ enum State<F: Future> {
     Took,
 }
 
-impl<F: Future> State<F> {
+impl<F> State<F>
+where
+    F: Future,
+{
     fn take(&mut self) -> Self {
         mem::replace(self, Self::Took)
     }
 }
 
-impl<F: Future + 'static> RawTask for LocalCell<TaskRepr<F>> {
+impl<F> RawTask for LocalCell<TaskRepr<F>>
+where
+    F: Future + 'static,
+{
     unsafe fn poll(&self, cx: &mut Context<'_>, out: *mut ()) {
         unsafe {
             self.with(|task| match task.state {
@@ -469,7 +490,7 @@ impl<F: Future + 'static> RawTask for LocalCell<TaskRepr<F>> {
                     });
 
                     if let Some(waker) = waker {
-                        waker.wake();
+                        util::wake(waker);
                     }
                 }
                 State::Took => {}
@@ -478,7 +499,7 @@ impl<F: Future + 'static> RawTask for LocalCell<TaskRepr<F>> {
         }
     }
 
-    unsafe fn cancel(self: Rc<Self>, out: *mut ()) {
+    unsafe fn cancel(&self, out: *mut ()) {
         unsafe {
             self.with(|task| match task.state.take() {
                 State::Complete(val) => {
@@ -490,7 +511,10 @@ impl<F: Future + 'static> RawTask for LocalCell<TaskRepr<F>> {
     }
 }
 
-unsafe impl<F: Future + 'static> RcWake for LocalCell<TaskRepr<F>> {
+unsafe impl<F> RcWake for LocalCell<TaskRepr<F>>
+where
+    F: Future + 'static,
+{
     fn wake(self: Rc<Self>) {
         unsafe {
             self.with(|task| match task.state.take() {
@@ -517,7 +541,7 @@ unsafe impl<F: Future + 'static> RcWake for LocalCell<TaskRepr<F>> {
 /// # Safety
 ///
 /// `created_on` must return the id of thread that the waker was created on.
-unsafe trait RcWake: 'static {
+unsafe trait RcWake {
     fn wake(self: Rc<Self>);
     fn created_on(&self) -> ThreadId;
 
@@ -527,7 +551,7 @@ unsafe trait RcWake: 'static {
 
     fn into_waker(self: Rc<Self>) -> Waker
     where
-        Self: Sized,
+        Self: Sized + 'static,
     {
         fn assert_not_sent(waker: &Rc<impl RcWake>) {
             if thread::current().id() != waker.created_on() {

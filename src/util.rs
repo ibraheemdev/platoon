@@ -26,7 +26,7 @@ where
     PollFn(f).await
 }
 
-pub const NO_RUNTIME: &str = "must be called within the context of the Astra runtime";
+pub const NO_RUNTIME: &str = "must be called within the context of the Platoon runtime";
 
 #[derive(Default)]
 pub struct UsizeHasher(usize);
@@ -58,14 +58,18 @@ pub fn wake(waker: Waker) {
     }
 }
 
-pub struct LocalCell<T: ?Sized> {
+pub struct LocalCell<T> {
     value: UnsafeCell<T>,
+    #[cfg(debug_assertions)]
+    borrowed: std::cell::Cell<bool>,
 }
 
 impl<T> LocalCell<T> {
     pub fn new(value: T) -> LocalCell<T> {
         LocalCell {
             value: UnsafeCell::new(value),
+            #[cfg(debug_assertions)]
+            borrowed: Default::default(),
         }
     }
 
@@ -76,12 +80,22 @@ impl<T> LocalCell<T> {
     where
         F: FnOnce(&mut T) -> R,
     {
+        #[cfg(debug_assertions)]
+        if self.borrowed.replace(true) {
+            panic!("attempted to borrow LocalCell twice");
+        }
+
         // SAFETY:
         // - caller guarantees that `with` will
         //  not be called in `f`, and that is the only
         //  way to get a reference to `val`.
         // - LocalCell is !Sync
-        let value = unsafe { &mut *self.value.get() };
-        f(value)
+        let val = unsafe { &mut *self.value.get() };
+        let val = f(val);
+
+        #[cfg(debug_assertions)]
+        self.borrowed.set(false);
+
+        val
     }
 }
