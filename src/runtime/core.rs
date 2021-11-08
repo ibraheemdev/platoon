@@ -116,7 +116,7 @@ impl Core {
                 interest.poll_ticks = Some([shared.tick, interest.last_tick]);
 
                 if should_modify {
-                    Self::modify_source(&shared.poller, &source)?;
+                    Self::modify_source(&shared.poller, source)?;
                 }
 
                 Poll::Pending
@@ -233,7 +233,6 @@ impl Core {
                             self.shared
                                 .with(|s| {
                                     s.drive_io(|next_timer| next_timer)
-                                        .ok()
                                         .expect("failed to drive IO")
                                 })
                                 .into_iter()
@@ -252,7 +251,6 @@ impl Core {
                 self.shared
                     .with(|s| {
                         s.drive_io(|_| Some(Duration::from_millis(0)))
-                            .ok()
                             .expect("failed to drive IO")
                     })
                     .into_iter()
@@ -313,7 +311,7 @@ impl Shared {
                         }
 
                         if source.read.has_interest() || source.write.has_interest() {
-                            Core::modify_source(&self.poller, &source)?;
+                            Core::modify_source(&self.poller, source)?;
                         }
                     }
                 }
@@ -501,11 +499,10 @@ where
 
     unsafe fn cancel(&self, out: *mut ()) {
         unsafe {
-            self.with(|task| match task.state.take() {
-                State::Complete(val) => {
+            self.with(|task| {
+                if let State::Complete(val) = task.state.take() {
                     *(out as *mut Option<F::Output>) = Some(val);
                 }
-                _ => {}
             })
         }
     }
