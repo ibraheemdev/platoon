@@ -1,6 +1,7 @@
 use std::cell::UnsafeCell;
 use std::future::Future;
 use std::hash::Hasher;
+use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
@@ -69,6 +70,17 @@ impl<T> LocalCell<T> {
             #[cfg(debug_assertions)]
             borrowed: Default::default(),
         }
+    }
+
+    pub fn cloned(&self) -> T
+    where
+        T: Clone,
+    {
+        unsafe { self.with(|value| value.clone()) }
+    }
+
+    pub fn replace(&self, value: T) -> T {
+        unsafe { self.with(|old| mem::replace(old, value)) }
     }
 
     /// # Safety

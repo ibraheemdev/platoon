@@ -1,12 +1,12 @@
 use crate::core::Core;
 use crate::task::JoinHandle;
+use crate::util::LocalCell;
 
-use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 
 thread_local! {
-    static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
+    static RUNTIME: LocalCell<Option<Runtime>> = LocalCell::new(None);
 }
 
 #[derive(Clone)]
@@ -26,18 +26,18 @@ impl Runtime {
         impl Drop for EnterGuard {
             fn drop(&mut self) {
                 RUNTIME.with(|rt| {
-                    *rt.borrow_mut() = self.0.take();
+                    rt.replace(self.0.take());
                 });
             }
         }
 
-        let old = RUNTIME.with(|rt| rt.borrow_mut().replace(self.clone()));
+        let old = RUNTIME.with(|rt| rt.replace(Some(self.clone())));
 
         EnterGuard(old)
     }
 
     pub fn current() -> Option<Self> {
-        RUNTIME.with(|rt| rt.borrow().clone())
+        RUNTIME.with(LocalCell::cloned)
     }
 
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -58,9 +58,11 @@ impl Runtime {
     }
 }
 
-pub fn block_on<F>(future: F) -> io::Result<F::Output>
+pub fn block_on<F>(future: F) -> F::Output
 where
     F: Future,
 {
-    Ok(Runtime::new()?.block_on(future))
+    Runtime::new()
+        .expect("failed to create runtime")
+        .block_on(future)
 }

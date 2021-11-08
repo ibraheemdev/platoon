@@ -21,8 +21,7 @@ fn main() {
                     .await;
             });
         }
-    })
-    .unwrap();
+    });
 }
 
 async fn hello(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
