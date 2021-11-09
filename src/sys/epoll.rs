@@ -36,9 +36,9 @@ impl Poller {
 
         syscall!(epoll_wait(
             self.fd,
-            events.as_mut_ptr() as *mut SysEvent,
-            events.capacity() as c_int,
-            timeout as c_int,
+            events.as_mut_ptr(),
+            events.capacity() as _,
+            timeout,
         ))
         .map(|n| unsafe {
             events.set_len(n as _);
@@ -56,7 +56,7 @@ impl Drop for Poller {
 impl From<&SysEvent> for Event {
     fn from(sys: &SysEvent) -> Self {
         Event {
-            key: sys.u64 as usize,
+            key: sys.u64 as _,
             readable: (sys.events as c_int & (EPOLLIN | EPOLLPRI)) != 0,
             writable: (sys.events as c_int & EPOLLOUT) != 0,
         }
@@ -74,7 +74,7 @@ impl From<Event> for SysEvent {
         }
         SysEvent {
             events: flags as _,
-            u64: event.key as u64,
+            u64: event.key as _,
         }
     }
 }

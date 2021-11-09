@@ -37,8 +37,8 @@ impl Poller {
                 .unwrap_or(std::ptr::null_mut())
         ))
         .map(|n| {
-            unsafe { events.set_len(n as usize) };
-            n as usize
+            unsafe { events.set_len(n as _) };
+            n as _
         })
     }
 
@@ -51,41 +51,24 @@ impl Poller {
     }
 
     pub fn update(&self, fd: RawFd, event: Event) -> io::Result<()> {
-        let read_flags = event.readable.then(|| EV_ADD | EV_ONESHOT);
-        let write_flags = event.writable.then(|| EV_ADD | EV_ONESHOT);
-
-        let changes = [
-            SysEvent {
-                ident: fd as _,
-                filter: EVFILT_READ,
-                flags: EV_RECEIPT | read_flags.unwrap_or(EV_DELETE),
-                fflags: 0,
-                data: 0,
-                udata: event.key as _,
-            },
-            SysEvent {
-                ident: fd as _,
-                filter: EVFILT_WRITE,
-                flags: EV_RECEIPT | write_flags.unwrap_or(EV_DELETE),
-                fflags: 0,
-                data: 0,
-                udata: event.key as _,
-            },
+        let mut changes = [
+            kchange(fd, event.readable, EVFILT_READ, event.key),
+            kchange(fd, event.writable, EVFILT_WRITE, event.key),
         ];
 
-        let mut events = changes;
         syscall!(kevent(
             self.fd,
             changes.as_ptr(),
             changes.len() as _,
-            events.as_mut_ptr(),
-            events.len() as _,
+            changes.as_mut_ptr(),
+            changes.len() as _,
             std::ptr::null(),
         ))?;
 
-        for event in &events {
+        for event in &changes {
             if (event.flags & EV_ERROR) != 0
                 && event.data != 0
+                // the event we tried to modify wasn't found, which is fine
                 && event.data != ENOENT as _
                 // https://github.com/tokio-rs/mio/issues/582
                 && event.data != EPIPE as _
@@ -107,12 +90,23 @@ impl Drop for Poller {
 impl From<&SysEvent> for Event {
     fn from(sys: &SysEvent) -> Self {
         Event {
-            key: sys.udata as usize,
+            key: sys.udata as _,
             readable: sys.filter == EVFILT_READ,
             // https://github.com/golang/go/commit/23aad448b1e3f7c3b4ba2af90120bde91ac865b4
             writable: sys.filter == EVFILT_WRITE
                 || (sys.filter == EVFILT_READ && (sys.flags & EV_EOF) != 0),
         }
+    }
+}
+
+fn kchange(fd: RawFd, interested: bool, filter: i16, key: usize) -> SysEvent {
+    SysEvent {
+        ident: fd as _,
+        filter: filter as _,
+        flags: EV_RECEIPT | interested.then(|| EV_ADD | EV_ONESHOT).unwrap_or(EV_DELETE),
+        fflags: 0,
+        data: 0,
+        udata: key as _,
     }
 }
 

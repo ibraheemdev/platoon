@@ -1,6 +1,6 @@
 use crate::core::Direction;
 use crate::sys::AsRaw;
-use crate::Runtime;
+use crate::{util, Runtime};
 
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::{self as sys, SocketAddr};
@@ -134,7 +134,7 @@ impl<T: AsRaw> Async<T> {
                 res => return res,
             }
 
-            self.runtime.core.ready(self.id, direction).await?;
+            util::poll_fn(|cx| self.runtime.core.poll_ready(self.id, direction, cx)).await?;
         }
     }
 }

@@ -18,7 +18,6 @@ pub struct Core {
 }
 
 struct Shared {
-    tick: usize,
     next_id: usize,
     poller: Poller,
     queue: VecDeque<Task>,
@@ -38,7 +37,6 @@ impl Core {
     pub fn new() -> io::Result<Self> {
         Ok(Core {
             shared: Rc::new(LocalCell::new(Shared {
-                tick: 0,
                 next_id: 0,
                 poller: Poller::new()?,
                 queue: VecDeque::with_capacity(INITIAL_TASKS),
@@ -98,14 +96,12 @@ impl Core {
                 let source = s.sources.get_mut(&key).unwrap();
                 let interest = source.interest(direction);
 
-                if let Some(ticks) = interest.poll_ticks {
-                    if ticks.iter().all(|&t| t != interest.last_tick) {
-                        interest.poll_ticks = None;
-                        return Poll::Ready(Ok(()));
-                    }
+                if interest.woke_up {
+                    interest.woke_up = false;
+                    return Poll::Ready(Ok(()));
                 }
 
-                let should_modify = !interest.has_interest();
+                let had_interest = interest.has_interest();
 
                 if let Some(waker) = interest.poller.take() {
                     if waker.will_wake(cx.waker()) {
@@ -117,9 +113,8 @@ impl Core {
                 }
 
                 interest.poller = Some(cx.waker().clone());
-                interest.poll_ticks = Some([s.tick, interest.last_tick]);
 
-                if should_modify {
+                if !had_interest {
                     Self::modify_source(&s.poller, source)?;
                 }
 
@@ -132,79 +127,6 @@ impl Core {
         }
 
         poll
-    }
-
-    pub async fn ready(&self, key: usize, direction: Direction) -> io::Result<()> {
-        struct Ready<'a> {
-            core: &'a Core,
-            key: usize,
-            direction: Direction,
-            ticks: Option<[usize; 2]>,
-            waker: Option<usize>,
-        }
-
-        impl<'a> Future for Ready<'a> {
-            type Output = io::Result<()>;
-
-            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                unsafe {
-                    self.core.shared.with(|s| {
-                        let source = s.sources.get_mut(&self.key).unwrap();
-                        let interest = source.interest(self.direction);
-
-                        if let Some(ticks) = self.ticks {
-                            if ticks.iter().all(|&t| t != interest.last_tick) {
-                                return Poll::Ready(Ok(()));
-                            }
-                        }
-
-                        let should_modify = !interest.has_interest();
-
-                        let waker = match self.waker {
-                            Some(waker) => waker,
-                            None => {
-                                interest.awaiters.push(None);
-                                self.ticks = Some([s.tick, interest.last_tick]);
-                                interest.awaiters.len() - 1
-                            }
-                        };
-
-                        interest.awaiters[waker] = Some(cx.waker().clone());
-
-                        if should_modify {
-                            Core::modify_source(&s.poller, source)?;
-                        }
-
-                        Poll::Pending
-                    })
-                }
-            }
-        }
-
-        impl<'a> Drop for Ready<'a> {
-            fn drop(&mut self) {
-                if let Some(waker) = self.waker {
-                    unsafe {
-                        self.core.shared.with(|s| {
-                            s.sources
-                                .get_mut(&self.key)
-                                .unwrap()
-                                .interest(self.direction)
-                                .awaiters[waker] = None
-                        });
-                    }
-                }
-            }
-        }
-
-        Ready {
-            key,
-            direction,
-            core: self,
-            ticks: None,
-            waker: None,
-        }
-        .await
     }
 
     fn modify_source(poller: &Poller, source: &Source) -> io::Result<()> {
@@ -359,7 +281,6 @@ impl Shared {
         &mut self,
         timeout: impl Fn(Option<Duration>) -> Option<Duration>,
     ) -> io::Result<Vec<Waker>> {
-        self.tick += 1;
         self.events.clear();
 
         let mut wakers = Vec::new();
@@ -372,11 +293,11 @@ impl Shared {
                 for e in self.events.iter().map(Event::from) {
                     if let Some(source) = self.sources.get_mut(&e.key) {
                         if e.readable {
-                            source.read.take(&mut wakers, self.tick);
+                            source.read.take(&mut wakers);
                         }
 
                         if e.writable {
-                            source.write.take(&mut wakers, self.tick);
+                            source.write.take(&mut wakers);
                         }
 
                         if source.read.has_interest() || source.write.has_interest() {
@@ -430,8 +351,7 @@ pub enum Direction {
 struct Interest {
     poller: Option<Waker>,
     awaiters: Vec<Option<Waker>>,
-    last_tick: usize,
-    poll_ticks: Option<[usize; 2]>,
+    woke_up: bool,
 }
 
 impl Interest {
@@ -443,7 +363,7 @@ impl Interest {
         self.wakers() != 0
     }
 
-    fn take(&mut self, wakers: &mut Vec<Waker>, current_tick: usize) {
+    fn take(&mut self, wakers: &mut Vec<Waker>) {
         wakers.reserve(self.wakers());
         wakers.extend(
             self.awaiters
@@ -452,7 +372,7 @@ impl Interest {
                 .chain(self.poller.take()),
         );
 
-        self.last_tick = current_tick;
+        self.woke_up = true;
     }
 }
 
