@@ -1,8 +1,19 @@
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub mod epoll;
+#[path = "./epoll.rs"]
+mod sys;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-pub use epoll::{Poller, SysEvent};
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
+#[path = "./kqueue.rs"]
+mod sys;
+
+pub use sys::{Poller, SysEvent};
 
 macro_rules! syscall {
     ($fn:ident $args:tt) => {{

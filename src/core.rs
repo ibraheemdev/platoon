@@ -172,7 +172,7 @@ impl Core {
                         interest.awaiters[waker] = Some(cx.waker().clone());
 
                         if should_modify {
-                            Core::modify_source(&s.poller, &source)?;
+                            Core::modify_source(&s.poller, source)?;
                         }
 
                         Poll::Pending
@@ -198,9 +198,9 @@ impl Core {
         }
 
         Ready {
-            core: &self,
-            direction,
             key,
+            direction,
+            core: self,
             ticks: None,
             waker: None,
         }

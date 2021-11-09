@@ -1,8 +1,8 @@
 use super::{syscall, Event};
 
 use libc::{
-    c_int, EPOLLIN, EPOLLONESHOT, EPOLLOUT, EPOLLPRI, EPOLLRDHUP, EPOLL_CTL_ADD, EPOLL_CTL_DEL,
-    EPOLL_CTL_MOD,
+    c_int, EPOLLIN, EPOLLONESHOT, EPOLLOUT, EPOLLPRI, EPOLLRDHUP, EPOLL_CLOEXEC, EPOLL_CTL_ADD,
+    EPOLL_CTL_DEL, EPOLL_CTL_MOD,
 };
 use std::io;
 use std::os::unix::io::RawFd;
@@ -14,7 +14,7 @@ pub struct Poller {
 
 impl Poller {
     pub fn new() -> io::Result<Self> {
-        syscall!(epoll_create1(libc::EPOLL_CLOEXEC)).map(|fd| Self { fd })
+        syscall!(epoll_create1(EPOLL_CLOEXEC)).map(|fd| Self { fd })
     }
 
     pub fn add(&self, fd: RawFd, event: Event) -> io::Result<()> {
@@ -32,9 +32,7 @@ impl Poller {
     }
 
     pub fn poll(&self, events: &mut Vec<SysEvent>, timeout: Option<Duration>) -> io::Result<usize> {
-        let timeout = timeout
-            .map(|to| to.as_millis() as libc::c_int)
-            .unwrap_or(-1);
+        let timeout = timeout.map(|to| to.as_millis() as c_int).unwrap_or(-1);
 
         syscall!(epoll_wait(
             self.fd,

@@ -112,7 +112,12 @@ impl<T: AsRaw> Async<T> {
                 res => return Poll::Ready(res),
             }
 
-            if let Poll::Pending = self.runtime.core.poll_ready(self.id, direction, cx)? {
+            if self
+                .runtime
+                .core
+                .poll_ready(self.id, direction, cx)?
+                .is_pending()
+            {
                 return Poll::Pending;
             }
         }
