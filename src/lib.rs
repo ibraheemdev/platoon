@@ -11,3 +11,4 @@ mod util;
 
 pub use runtime::{block_on, Runtime};
 pub use task::spawn;
+pub use time::sleep;

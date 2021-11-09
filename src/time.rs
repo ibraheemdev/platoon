@@ -14,7 +14,7 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
     Sleep {
         deadline,
         alarm: None,
-        runtime: Runtime::current().expect(util::err::NO_RUNTIME),
+        runtime: Runtime::unwrap_current(),
     }
 }
 

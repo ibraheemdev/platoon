@@ -1,189 +1,222 @@
+use crate::core::Direction;
+use crate::sys::AsRaw;
+use crate::Runtime;
+
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
-use std::net::SocketAddr;
-use std::os::unix::io::AsRawFd;
+use std::net::{self as sys, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::core::Direction;
-use crate::{util, Runtime};
+use futures_io::{AsyncRead, AsyncWrite};
 
 pub struct TcpListener {
-    rt: Runtime,
-    sys: std::net::TcpListener,
-    id: usize,
+    inner: Async<sys::TcpListener>,
 }
 
+into_std! {
+    /// ...
+    TcpListener => sys::TcpListener
+}
+
+from_std! { sys::TcpListener => TcpListener }
+
 impl TcpListener {
-    pub async fn bind<A: Into<SocketAddr>>(addr: A) -> io::Result<TcpListener> {
-        let addr = addr.into();
-        let sys = std::net::TcpListener::bind(addr)?;
+    pub async fn bind<A>(addr: A) -> io::Result<TcpListener>
+    where
+        A: Into<SocketAddr>,
+    {
+        let sys = sys::TcpListener::bind(addr.into())?;
+        sys.set_nonblocking(true)?;
+        Async::new(sys, Runtime::unwrap_current()).map(|inner| Self { inner })
+    }
+
+    pub fn poll_accept(&self, cx: &mut Context) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+        self.inner
+            .poll_io(Direction::Read, |sys| sys.accept(), cx)
+            .map(|result| {
+                let (sys, addr) = result?;
+                sys.set_nonblocking(true)?;
+                let stream = TcpStream {
+                    inner: Async::new(sys, self.inner.runtime.clone())?,
+                };
+                Ok((stream, addr))
+            })
+    }
+
+    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        let (sys, addr) = self
+            .inner
+            .do_io(Direction::Read, |sys| sys.accept())
+            .await?;
         sys.set_nonblocking(true)?;
 
-        let rt = Runtime::current().unwrap();
+        let stream = TcpStream {
+            inner: Async::new(sys, self.inner.runtime.clone())?,
+        };
 
-        let id = rt.core.insert_source(sys.as_raw_fd())?;
-
-        Ok(TcpListener { id, sys, rt })
-    }
-
-    pub fn poll_accept(&self, cx: &mut Context) -> Poll<io::Result<TcpStream>> {
-        loop {
-            match self.rt.core.poll_ready(self.id, Direction::Read, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-
-            match self.sys.accept() {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                Err(err) => return Poll::Ready(Err(err)),
-                Ok((sys, _)) => {
-                    sys.set_nonblocking(true)?;
-                    let id = self.rt.core.insert_source(sys.as_raw_fd())?;
-                    return Poll::Ready(Ok(TcpStream {
-                        id,
-                        rt: self.rt.clone(),
-                        sys,
-                    }));
-                }
-            }
-        }
-    }
-
-    pub async fn accept(&self) -> io::Result<TcpStream> {
-        loop {
-            match self.sys.accept() {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                Err(err) => return Err(err),
-                Ok((sys, _)) => {
-                    sys.set_nonblocking(true)?;
-                    let id = self.rt.core.insert_source(sys.as_raw_fd())?;
-                    return Ok(TcpStream {
-                        id,
-                        rt: self.rt.clone(),
-                        sys,
-                    });
-                }
-            }
-
-            util::poll_fn(|cx| self.rt.core.poll_ready(self.id, Direction::Read, cx)).await?;
-        }
+        Ok((stream, addr))
     }
 }
 
 pub struct TcpStream {
-    rt: Runtime,
-    sys: std::net::TcpStream,
+    inner: Async<sys::TcpStream>,
+}
+
+from_std! { sys::TcpStream => TcpStream }
+into_std! { TcpStream => sys::TcpStream }
+async_read_write! { TcpStream }
+
+struct Async<T> {
     id: usize,
+    sys: Option<T>,
+    runtime: Runtime,
 }
 
-impl TcpStream {
-    pub fn from_std(sys: std::net::TcpStream) -> io::Result<TcpStream> {
-        let rt = Runtime::current().unwrap();
-        let id = rt.core.insert_source(sys.as_raw_fd())?;
-        Ok(Self { rt, id, sys })
+impl<T> Async<T>
+where
+    T: AsRaw,
+{
+    fn new(sys: T, runtime: Runtime) -> io::Result<Self> {
+        runtime.core.insert_source(&sys).map(|id| Self {
+            id,
+            sys: Some(sys),
+            runtime,
+        })
     }
 
-    pub fn into_std(self) -> io::Result<std::net::TcpStream> {
-        self.rt.core.remove_source(self.id)?;
-        Ok(self.sys)
-    }
-}
-
-impl futures_io::AsyncRead for TcpStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            match self.sys.read(buf) {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                res => return Poll::Ready(res),
-            }
-
-            match self.rt.core.poll_ready(self.id, Direction::Read, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
-            }
+    fn sys(&self) -> &T {
+        debug_assert!(self.sys.is_some());
+        match &self.sys {
+            Some(sys) => sys,
+            None => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 
-    fn poll_read_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            match self.sys.read_vectored(bufs) {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                res => return Poll::Ready(res),
-            }
-
-            match self.rt.core.poll_ready(self.id, Direction::Read, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
+    fn into_sys(mut self) -> io::Result<T> {
+        let sys = self.sys.take().unwrap();
+        self.runtime.core.remove_source(self.id)?;
+        Ok(sys)
     }
 }
 
-impl futures_io::AsyncWrite for TcpStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
+impl<T: AsRaw> Async<T> {
+    fn poll_io<R>(
+        &self,
+        direction: Direction,
+        mut f: impl FnMut(&T) -> io::Result<R>,
         cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<R>> {
         loop {
-            match self.sys.write(buf) {
+            match f(self.sys()) {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                 res => return Poll::Ready(res),
             }
 
-            match self.rt.core.poll_ready(self.id, Direction::Write, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
+            if let Poll::Pending = self.runtime.core.poll_ready(self.id, direction, cx)? {
+                return Poll::Pending;
             }
         }
     }
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
+
+    async fn do_io<R>(
+        &self,
+        direction: Direction,
+        mut f: impl FnMut(&T) -> io::Result<R>,
+    ) -> io::Result<R> {
         loop {
-            match self.sys.write_vectored(bufs) {
+            match f(self.sys()) {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                res => return Poll::Ready(res),
+                res => return res,
             }
 
-            match self.rt.core.poll_ready(self.id, Direction::Write, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
-            }
+            self.runtime.core.ready(self.id, direction).await?;
         }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        loop {
-            match self.sys.flush() {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                res => return Poll::Ready(res),
-            }
-
-            match self.rt.core.poll_ready(self.id, Direction::Write, cx) {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(_)) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
     }
 }
+
+impl<T> Drop for Async<T> {
+    fn drop(&mut self) {
+        if self.sys.is_some() {
+            let _ = self.runtime.core.remove_source(self.id);
+        }
+    }
+}
+
+macro_rules! async_read_write {
+    ($ty:ty) => {
+        impl AsyncRead for $ty {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut [u8],
+            ) -> Poll<io::Result<usize>> {
+                self.inner
+                    .poll_io(Direction::Read, |mut sys| sys.read(buf), cx)
+            }
+
+            fn poll_read_vectored(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &mut [IoSliceMut<'_>],
+            ) -> Poll<io::Result<usize>> {
+                self.inner
+                    .poll_io(Direction::Read, |mut sys| sys.read_vectored(bufs), cx)
+            }
+        }
+
+        impl AsyncWrite for $ty {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.inner
+                    .poll_io(Direction::Write, |mut sys| sys.write(buf), cx)
+            }
+
+            fn poll_write_vectored(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &[IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                self.inner
+                    .poll_io(Direction::Write, |mut sys| sys.write_vectored(bufs), cx)
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.inner
+                    .poll_io(Direction::Write, |mut sys| sys.flush(), cx)
+            }
+
+            fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.poll_flush(cx)
+            }
+        }
+    };
+}
+
+macro_rules! into_std {
+    ($(#[$meta:meta])* $ty:ty => $sys:ty) => {
+        impl $ty {
+            $(#[$meta])*
+            pub fn into_std(self) -> io::Result<$sys> {
+                self.inner.into_sys()
+            }
+        }
+    };
+}
+
+macro_rules! from_std {
+    ($(#[$meta:meta])* $sys:ty => $ty:ty) => {
+        impl $ty {
+            $(#[$meta])*
+            pub fn from_std(sys: $sys) -> io::Result<$ty> {
+                Async::new(sys, Runtime::unwrap_current()).map(|inner| Self { inner })
+            }
+        }
+    };
+}
+
+pub(self) use async_read_write;
+pub(self) use from_std;
+pub(self) use into_std;

@@ -11,7 +11,7 @@ fn main() {
 
         let tcp_listener = TcpListener::bind(addr).await.unwrap();
         loop {
-            let tcp_stream = tcp_listener.accept().await.unwrap();
+            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
 
             platoon::spawn(async move {
                 let _ = Http::new()

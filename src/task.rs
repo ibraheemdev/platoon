@@ -1,5 +1,5 @@
 use crate::core::Task;
-use crate::{util, Runtime};
+use crate::Runtime;
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -11,9 +11,7 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    Runtime::current()
-        .expect(util::err::NO_RUNTIME)
-        .spawn(future)
+    Runtime::unwrap_current().spawn(future)
 }
 
 pub struct JoinHandle<T> {

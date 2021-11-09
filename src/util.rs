@@ -109,7 +109,3 @@ impl<T> LocalCell<T> {
         val
     }
 }
-
-pub mod err {
-    pub const NO_RUNTIME: &str = "must be called within the context of the Platoon runtime";
-}

@@ -40,6 +40,10 @@ impl Runtime {
         RUNTIME.with(LocalCell::cloned)
     }
 
+    pub(crate) fn unwrap_current() -> Self {
+        Self::current().expect("must be called within the context of the Platoon runtime")
+    }
+
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,

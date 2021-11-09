@@ -23,3 +23,41 @@ pub struct Event {
     pub readable: bool,
     pub writable: bool,
 }
+
+pub trait AsRaw {
+    fn as_raw(&self) -> Raw;
+}
+
+pub use raw::Raw;
+
+#[cfg(unix)]
+mod raw {
+    use std::os::unix::io::{AsRawFd, RawFd};
+
+    impl<T> super::AsRaw for T
+    where
+        T: AsRawFd,
+    {
+        fn as_raw(&self) -> Raw {
+            self.as_raw_fd()
+        }
+    }
+
+    pub type Raw = RawFd;
+}
+
+#[cfg(windows)]
+mod raw {
+    use std::os::windows::io::{AsRawSocket, RawSocket};
+
+    impl<T> super::AsRaw for T
+    where
+        T: AsRawSocket,
+    {
+        fn as_raw(&self) -> Raw {
+            self.as_raw_socket()
+        }
+    }
+
+    pub type Raw = RawSocket;
+}

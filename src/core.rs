@@ -1,18 +1,16 @@
+use crate::sys::{AsRaw, Event, Poller, Raw, SysEvent};
 use crate::util::{self, LocalCell};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::hash::BuildHasherDefault;
 use std::mem::ManuallyDrop;
-use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 use std::{io, mem};
-
-use crate::sys::{Event, Poller, SysEvent};
 
 #[derive(Clone)]
 pub struct Core {
@@ -53,12 +51,12 @@ impl Core {
         })
     }
 
-    pub fn insert_source(&self, raw: RawFd) -> io::Result<usize> {
+    pub fn insert_source(&self, raw: &impl AsRaw) -> io::Result<usize> {
         unsafe {
             self.shared.with(|s| {
                 let key = s.sources.len();
                 s.poller.add(
-                    raw,
+                    raw.as_raw(),
                     Event {
                         key,
                         ..Default::default()
@@ -67,7 +65,7 @@ impl Core {
                 s.sources.insert(
                     key,
                     Source {
-                        raw,
+                        raw: raw.as_raw(),
                         key,
                         read: Default::default(),
                         write: Default::default(),
@@ -93,7 +91,7 @@ impl Core {
         direction: Direction,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut to_wake = None;
+        let mut previous = None;
 
         let poll = unsafe {
             self.shared.with(|s| {
@@ -115,7 +113,7 @@ impl Core {
                         return Poll::Pending;
                     }
 
-                    to_wake = Some(waker);
+                    previous = Some(waker);
                 }
 
                 interest.poller = Some(cx.waker().clone());
@@ -129,11 +127,84 @@ impl Core {
             })
         };
 
-        if let Some(waker) = to_wake {
+        if let Some(waker) = previous {
             util::wake(waker);
         }
 
         poll
+    }
+
+    pub async fn ready(&self, key: usize, direction: Direction) -> io::Result<()> {
+        struct Ready<'a> {
+            core: &'a Core,
+            key: usize,
+            direction: Direction,
+            ticks: Option<[usize; 2]>,
+            waker: Option<usize>,
+        }
+
+        impl<'a> Future for Ready<'a> {
+            type Output = io::Result<()>;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                unsafe {
+                    self.core.shared.with(|s| {
+                        let source = s.sources.get_mut(&self.key).unwrap();
+                        let interest = source.interest(self.direction);
+
+                        if let Some(ticks) = self.ticks {
+                            if ticks.iter().all(|&t| t != interest.last_tick) {
+                                return Poll::Ready(Ok(()));
+                            }
+                        }
+
+                        let should_modify = !interest.has_interest();
+
+                        let waker = match self.waker {
+                            Some(waker) => waker,
+                            None => {
+                                interest.awaiters.push(None);
+                                self.ticks = Some([s.tick, interest.last_tick]);
+                                interest.awaiters.len() - 1
+                            }
+                        };
+
+                        interest.awaiters[waker] = Some(cx.waker().clone());
+
+                        if should_modify {
+                            Core::modify_source(&s.poller, &source)?;
+                        }
+
+                        Poll::Pending
+                    })
+                }
+            }
+        }
+
+        impl<'a> Drop for Ready<'a> {
+            fn drop(&mut self) {
+                if let Some(waker) = self.waker {
+                    unsafe {
+                        self.core.shared.with(|s| {
+                            s.sources
+                                .get_mut(&self.key)
+                                .unwrap()
+                                .interest(self.direction)
+                                .awaiters[waker] = None
+                        });
+                    }
+                }
+            }
+        }
+
+        Ready {
+            core: &self,
+            direction,
+            key,
+            ticks: None,
+            waker: None,
+        }
+        .await
     }
 
     fn modify_source(poller: &Poller, source: &Source) -> io::Result<()> {
@@ -334,7 +405,7 @@ unsafe impl RcWake for LocalCell<Shared> {
 }
 
 struct Source {
-    raw: RawFd,
+    raw: Raw,
     key: usize,
     read: Interest,
     write: Interest,
