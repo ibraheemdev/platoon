@@ -1,9 +1,9 @@
-on: [push, pull_request]
-
 name: CI
 
+on: [push, pull_request]
+
 jobs:
-  check:
+  build_and_test:
     strategy:
       fail-fast: false
       matrix:
@@ -11,86 +11,60 @@ jobs:
           - { name: Linux, os: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
           - { name: macOS, os: macos-latest, triple: x86_64-apple-darwin }
           # - { name: Windows, os: windows-2022, triple: x86_64-pc-windows-msvc }
-    runs-on: ${{ matrix.target.os }}
-    name: Check / ${{ matrix.target.name }}
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
+        version:
+          - stable
 
-  test:
-    name: Test
-    runs-on: [ubuntu-latest, macos-latest]
+    name: ${{ matrix.target.name }} / ${{ matrix.version }}
+    runs-on: ${{ matrix.target.os }}
+
     steps:
       - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      
+      - name: install rust ${{ matrix.version }}
+        uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: ${{ matrix.version }}-${{ matrix.target.triple }}
+          profile: minimal
           override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all-features
-          
-  doc:
-    name: Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --doc
-          
+
+      - name: check
+        uses: actions-rs/cargo@v1
+        with: { command: check, args: --all-features --tests --examples }
+
+      - name: tests
+        uses: actions-rs/cargo@v1
+        with: { command: test, args: --all-features -- --nocapture}
+        
+      - name: doc tests
+        uses: actions-rs/cargo@v1
+        with: { command: test, args: --doc --all-features -- --nocapture }
+        
   fmt:
-    name: Format
+    name: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+          components: rustfmt
           override: true
-      - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
           args: --all -- --check
 
   clippy:
-    name: Clippy
+    name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: stable
+          components: clippy
           override: true
-      - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
           args: --all-features -- --deny warnings --deny clippy::all
-
-  miri:
-    name: Miri
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          override: true
-      - run: |
-          rustup component add miri
-          cargo miri setup
-          cargo miri test --all-features
