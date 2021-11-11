@@ -13,3 +13,4 @@ libc = "0.2.107"
 [dev-dependencies]
 hyper = { version = "0.14.14", features = ["full"] }
 tokio = { version = "1" }
+static_assertions = "1.1.0"
