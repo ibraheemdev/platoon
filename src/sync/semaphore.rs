@@ -1,5 +1,7 @@
-use crate::util::{poll_fn, LocalCell};
+use crate::util::LocalCell;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 use slab::Slab;
@@ -19,6 +21,12 @@ struct Entry {
     notified: bool,
 }
 
+enum AcquireState {
+    Idle,
+    Waiting(usize),
+    Done,
+}
+
 impl Semaphore {
     pub fn new(permits: usize) -> Self {
         Semaphore {
@@ -30,15 +38,41 @@ impl Semaphore {
     }
 
     pub async fn acquire(&self, permits: usize) -> Release<'_> {
-        let mut entry = None;
-        poll_fn(|cx| unsafe {
-            self.inner
-                .with(|i| i.poll_acquire(permits, &mut entry, cx))
-                .map(|_| Release {
-                    semaphore: self,
-                    permits,
-                })
-        })
+        struct Acquire<'a> {
+            semaphore: &'a Semaphore,
+            state: AcquireState,
+            permits: usize,
+        }
+
+        impl<'a> Future for Acquire<'a> {
+            type Output = Release<'a>;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                unsafe {
+                    self.semaphore
+                        .inner
+                        .with(|i| i.poll_acquire(self.permits, &mut self.state, cx))
+                        .map(|_| Release {
+                            semaphore: self.semaphore,
+                            permits: self.permits,
+                        })
+                }
+            }
+        }
+
+        impl Drop for Acquire<'_> {
+            fn drop(&mut self) {
+                if let AcquireState::Waiting(entry) = self.state {
+                    unsafe { self.semaphore.inner.with(|i| i.entries.remove(entry)) };
+                }
+            }
+        }
+
+        Acquire {
+            semaphore: self,
+            state: AcquireState::Idle,
+            permits,
+        }
         .await
     }
 
@@ -92,11 +126,11 @@ impl Inner {
     fn poll_acquire(
         &mut self,
         permits: usize,
-        entry: &mut Option<usize>,
+        state: &mut AcquireState,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
-        match entry {
-            None => {
+        match state {
+            AcquireState::Idle => {
                 if self.try_acquire(permits) {
                     Poll::Ready(())
                 } else {
@@ -105,15 +139,12 @@ impl Inner {
                         required: permits,
                         notified: false,
                     });
-                    *entry = Some(key);
+                    *state = AcquireState::Waiting(key);
                     Poll::Pending
                 }
             }
-            Some(i) => {
-                let entry = self
-                    .entries
-                    .get_mut(*i)
-                    .expect("future polled after completion");
+            AcquireState::Waiting(i) => {
+                let entry = self.entries.get_mut(*i).unwrap();
 
                 if entry.notified {
                     assert!(self.permits >= entry.required);
@@ -122,6 +153,7 @@ impl Inner {
                     self.entries.remove(*i);
                     self.notify_last();
 
+                    *state = AcquireState::Done;
                     Poll::Ready(())
                 } else {
                     match &mut entry.waker {
@@ -133,6 +165,7 @@ impl Inner {
                     Poll::Pending
                 }
             }
+            AcquireState::Done => panic!("future polled after completion"),
         }
     }
 
