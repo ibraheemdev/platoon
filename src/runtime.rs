@@ -103,8 +103,10 @@ impl Runtime {
 
 /// Runs the provided future to completion.
 ///
-/// Any tasks, timers, and I/O will be run concurrently with this future
+/// Any tasks, timers, and I/O or be run concurrently with this future
 /// until it completes.
+///
+/// # Examples
 ///
 /// ```no_run
 /// use std::time::Duration;

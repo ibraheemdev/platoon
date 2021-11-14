@@ -1,3 +1,19 @@
+//! Asynchronous timers.
+//!
+//! The timers in this module operate at millisecond granularity.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use std::time::Duration;
+//!
+//! fn main() {
+//!     platoon::block_on(async {
+//!         platoon::sleep(Duration::from_secs(1)).await;
+//!         println!("Hello after 1 second");
+//!     });
+//! }
+//! ```
 use crate::{util, Runtime};
 
 use std::fmt;
@@ -6,10 +22,34 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+/// Puts the current task to sleep for the specified amount of time.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// # platoon::block_on(async {
+/// platoon::sleep(Duration::from_secs(1)).await;
+/// println!("Hello after 1 second");
+/// # });
+/// ```
 pub fn sleep(duration: Duration) -> Sleep {
     sleep_until(Instant::now() + duration)
 }
 
+/// Puts the current task to sleep until `deadline`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::{Duration, Instant};
+///
+/// # platoon::block_on(async {
+/// platoon::sleep_until(Instant::now() + Duration::from_secs(1)).await;
+/// println!("Hello after 1 second");
+/// # });
+/// ```
 pub fn sleep_until(deadline: Instant) -> Sleep {
     Sleep {
         deadline,
@@ -18,6 +58,7 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
     }
 }
 
+/// Future returned by [`sleep`] and [`sleep_until`].
 pub struct Sleep {
     deadline: Instant,
     alarm: Option<(usize, Waker)>,
@@ -25,6 +66,12 @@ pub struct Sleep {
 }
 
 impl Sleep {
+    /// Returns the instant at which the future will complete.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Resets the timer to a new deadline.
     pub fn reset(&mut self, deadline: Instant) {
         if let Some((id, _)) = self.alarm.as_mut() {
             self.runtime.core.reset_alarm(*id, self.deadline, deadline);
@@ -74,23 +121,64 @@ impl Drop for Sleep {
     }
 }
 
-pub fn interval(period: Duration) -> Interval {
-    interval_at(Instant::now() + period, period)
+/// Returns an `Interval` that ticks every specified duration.
+///
+/// THe first tick returns immediately. Use [`interval_at`] if you
+/// want to customize the start time.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::{Duration};
+/// use platoon::time::interval;
+///
+/// # platoon::block_on(async {
+/// let mut interval = interval(Duration::from_secs(1));
+/// for i in 0..5 {
+///     interval.tick().await;
+///     println!("tick");
+/// }
+/// # });
+/// ```
+pub fn interval(interval: Duration) -> Interval {
+    interval_at(Instant::now(), interval)
 }
 
-pub fn interval_at(period: Instant, interval: Duration) -> Interval {
+/// Returns an `Interval` that ticks every specified duration.
+///
+/// The first tick returns at `start`.
+///
+/// ```no_run
+/// use std::time::{Instant, Duration};
+/// use platoon::time::interval_at;
+///
+/// # platoon::block_on(async {
+/// let mut interval = interval_at(Instant::now() + Duration_from_secs(5), Duration::from_secs(1));
+///
+/// interval.tick().await; // 5 secs
+/// interval.tick().await; // 6 secs
+/// interval.tick().await; // 7 secs
+///
+/// println!("It's been 5 seconds");
+/// # });
+/// ```
+pub fn interval_at(start: Instant, interval: Duration) -> Interval {
     Interval {
         interval,
-        sleep: sleep_until(period),
+        sleep: sleep_until(start),
     }
 }
 
+/// An interval timer.
+///
+/// See [`interval`] and [`interval_at`] for details.
 pub struct Interval {
     sleep: Sleep,
     interval: Duration,
 }
 
 impl Interval {
+    /// Completes when the next interval is reached.
     pub async fn tick(&mut self) -> Option<Instant> {
         util::poll_fn(move |cx| {
             if Pin::new(&mut self.sleep).poll(cx).is_pending() {
@@ -105,6 +193,26 @@ impl Interval {
     }
 }
 
+/// Causes a future to time out after a given duration of time.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use platoon::time::timeout;
+///
+/// # async fn fetch_record() {}
+/// # platoon::block_on(async {
+/// match timeout(Duration_from_millis(5), fetch_user()) {
+///     Ok(user) => {
+///         // ...
+///     },
+///     Err(_) => {
+///         println!("took over 5 ms to fetch user")
+///     }
+/// }
+/// });
+/// ```
 pub fn timeout<T>(duration: Duration, future: T) -> Timeout<T>
 where
     T: Future,
@@ -112,6 +220,26 @@ where
     timeout_at(Instant::now() + duration, future)
 }
 
+/// Causes a future to time out at the given deadline.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::{Instant, Duration};
+/// use platoon::time::timeout;
+///
+/// # async fn fetch_record() {}
+/// # platoon::block_on(async {
+/// match timeout_at(Instant::now() + Duration_from_millis(5), fetch_user()) {
+///     Ok(user) => {
+///         // ...
+///     },
+///     Err(_) => {
+///         println!("took over 5 ms to fetch user")
+///     }
+/// }
+/// });
+/// ```
 pub fn timeout_at<T>(deadline: Instant, future: T) -> Timeout<T>
 where
     T: Future,
@@ -123,6 +251,7 @@ where
 }
 
 pin_project_lite::pin_project! {
+    /// Future returned by [`timeout`] and [`timeout_at`].
     pub struct Timeout<F> {
         #[pin]
         future: F,
@@ -150,6 +279,7 @@ where
     }
 }
 
+/// Error returned by [`Timeout`].
 #[derive(PartialEq, Eq)]
 pub struct TimedOut {
     _priv: (),
