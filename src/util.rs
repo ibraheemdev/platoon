@@ -41,6 +41,7 @@ pub struct LocalCell<T> {
     value: UnsafeCell<T>,
     #[cfg(debug_assertions)]
     borrowed: std::cell::Cell<bool>,
+    _not_send: *mut (),
 }
 
 impl<T> LocalCell<T> {
@@ -49,6 +50,7 @@ impl<T> LocalCell<T> {
             value: UnsafeCell::new(value),
             #[cfg(debug_assertions)]
             borrowed: Default::default(),
+            _not_send: std::ptr::null_mut(),
         }
     }
 

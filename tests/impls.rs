@@ -9,4 +9,8 @@ fn assert_not_send() {
     assert_not_impl_any!(platoon::time::Sleep: Send, Sync);
     assert_not_impl_any!(platoon::time::Timeout<()>: Send, Sync);
     assert_not_impl_any!(platoon::task::JoinHandle<()>: Send, Sync);
+
+    assert_not_impl_any!(platoon::sync::oneshot::Sender<()>: Send, Sync);
+    assert_not_impl_any!(platoon::sync::oneshot::Receiver<()>: Send, Sync);
+    assert_not_impl_any!(platoon::sync::Semaphore: Send, Sync);
 }
