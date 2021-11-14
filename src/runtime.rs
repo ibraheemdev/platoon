@@ -111,12 +111,10 @@ impl Runtime {
 /// ```no_run
 /// use std::time::Duration;
 ///
-/// fn main() {
-///     platoon::block_on(async {
-///         platoon::sleep(Duration::from_secs(1)).await;
-///         println!("Hello world!");
-///     });
-/// }
+/// platoon::block_on(async {
+///     platoon::sleep(Duration::from_secs(1)).await;
+///     println!("Hello world!");
+/// });
 /// ```
 pub fn block_on<F>(future: F) -> F::Output
 where

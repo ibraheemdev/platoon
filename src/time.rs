@@ -7,12 +7,10 @@
 //! ```no_run
 //! use std::time::Duration;
 //!
-//! fn main() {
-//!     platoon::block_on(async {
-//!         platoon::sleep(Duration::from_secs(1)).await;
-//!         println!("Hello after 1 second");
-//!     });
-//! }
+//! platoon::block_on(async {
+//!     platoon::sleep(Duration::from_secs(1)).await;
+//!     println!("Hello after 1 second");
+//! });
 //! ```
 use crate::{util, Runtime};
 
