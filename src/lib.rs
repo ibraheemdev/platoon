@@ -9,6 +9,9 @@ mod core;
 mod sys;
 mod util;
 
-pub use runtime::{block_on, Runtime};
-pub use task::spawn;
-pub use time::sleep;
+#[doc(inline)]
+pub use self::{
+    runtime::{block_on, Runtime},
+    task::spawn,
+    time::sleep,
+};
