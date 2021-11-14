@@ -1,11 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod net;
-pub mod runtime;
 pub mod task;
 pub mod time;
 
 mod core;
+mod runtime;
 mod sys;
 mod util;
 

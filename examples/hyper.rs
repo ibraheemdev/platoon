@@ -10,13 +10,13 @@ fn main() {
         let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
 
         let listener = TcpListener::bind(addr).await.unwrap();
+
         loop {
             let (stream, _) = listener.accept().await.unwrap();
 
             platoon::spawn(async move {
                 let _ = Http::new()
-                    .http1_only(true)
-                    .http1_keep_alive(true)
+                    .with_executor(compat::Spawn)
                     .serve_connection(compat::HyperStream(stream), service::service_fn(hello))
                     .await;
             });
@@ -29,10 +29,23 @@ async fn hello(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
 }
 
 mod compat {
+    #[derive(Clone)]
+    pub struct Spawn;
+
+    impl<Fut> hyper::rt::Executor<Fut> for Spawn
+    where
+        Fut: Future + 'static,
+    {
+        fn execute(&self, fut: Fut) {
+            platoon::spawn(fut);
+        }
+    }
+
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
     use futures_io::{AsyncRead, AsyncWrite};
+    use futures_util::Future;
     use platoon::net::TcpStream;
     use tokio::io::ReadBuf;
 

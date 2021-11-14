@@ -12,5 +12,5 @@ socket2 = { version = "0.4.2", features = ["all"] }
 [dev-dependencies]
 hyper = { version = "0.14.14", features = ["full"] }
 tokio = { version = "1" }
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 static_assertions = "1.1.0"
