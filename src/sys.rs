@@ -1,4 +1,7 @@
 pub use poller::{Poller, SysEvent};
+pub use raw::Raw;
+
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 #[derive(Default)]
 pub struct Event {
@@ -10,8 +13,6 @@ pub struct Event {
 pub trait AsRaw {
     fn as_raw(&self) -> Raw;
 }
-
-pub use raw::Raw;
 
 #[cfg(unix)]
 mod raw {
@@ -43,6 +44,49 @@ mod raw {
     }
 
     pub type Raw = RawSocket;
+}
+
+pub fn connect(
+    addr: SockAddr,
+    domain: Domain,
+    protocol: Option<Protocol>,
+) -> std::io::Result<Socket> {
+    let sock_type = Type::STREAM;
+    #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    let sock_type = sock_type.nonblocking();
+
+    let socket = Socket::new(domain, sock_type, protocol)?;
+
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    socket.set_nonblocking(true)?;
+
+    match socket.connect(&addr) {
+        Ok(_) => {}
+        #[cfg(unix)]
+        Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(err) => return Err(err),
+    }
+
+    Ok(socket)
 }
 
 #[cfg(any(
@@ -264,3 +308,14 @@ mod poller {
 
     pub type SysEvent = libc::epoll_event;
 }
+
+macro_rules! cfg_unix {
+    ($($item:item)*) => { $(#[cfg(unix)] $item)* }
+}
+
+macro_rules! cfg_windows {
+    ($($item:item)*) => { $(#[cfg(windows)] $item)* }
+}
+
+pub(crate) use cfg_unix;
+pub(crate) use cfg_windows;

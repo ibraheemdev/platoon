@@ -3,14 +3,14 @@ name = "platoon"
 version = "0.1.0"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-futures-io = "0.3.17"
-pin-project-lite = "0.2.7"
-libc = "0.2.107"
+futures-io = "0.3"
+pin-project-lite = "0.2"
+libc = "0.2"
+socket2 = { version = "0.4.2", features = ["all"] }
 
 [dev-dependencies]
 hyper = { version = "0.14.14", features = ["full"] }
 tokio = { version = "1" }
+futures-util = "0.3"
 static_assertions = "1.1.0"

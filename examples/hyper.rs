@@ -9,15 +9,15 @@ fn main() {
     platoon::block_on(async move {
         let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
 
-        let tcp_listener = TcpListener::bind(addr).await.unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
         loop {
-            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
 
             platoon::spawn(async move {
                 let _ = Http::new()
                     .http1_only(true)
                     .http1_keep_alive(true)
-                    .serve_connection(compat::HyperStream(tcp_stream), service::service_fn(hello))
+                    .serve_connection(compat::HyperStream(stream), service::service_fn(hello))
                     .await;
             });
         }
