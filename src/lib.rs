@@ -1,4 +1,4 @@
-#![allow(unused_unsafe)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod net;
 pub mod runtime;

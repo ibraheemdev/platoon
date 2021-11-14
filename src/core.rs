@@ -392,13 +392,17 @@ pub struct Task {
 impl Task {
     pub unsafe fn poll<T>(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         let mut out: Poll<T> = Poll::Pending;
-        self.raw.poll(cx, &mut out as *mut _ as *mut _);
+        unsafe {
+            self.raw.poll(cx, &mut out as *mut _ as *mut _);
+        }
         out
     }
 
     pub unsafe fn cancel<T>(self) -> Option<T> {
         let mut out: Option<T> = None;
-        self.raw.cancel(&mut out as *mut _ as *mut _);
+        unsafe {
+            self.raw.cancel(&mut out as *mut _ as *mut _);
+        }
         out
     }
 }
@@ -427,7 +431,7 @@ where
                     State::Complete(val) => {
                         *(out as *mut Poll<F::Output>) = Poll::Ready(val);
                     }
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+                    _ => std::hint::unreachable_unchecked(),
                 },
                 State::Took => {
                     panic!("JoinHandle polled after completion")
