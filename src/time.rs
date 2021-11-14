@@ -44,9 +44,10 @@ pub fn sleep(duration: Duration) -> Sleep {
 ///
 /// ```no_run
 /// use std::time::{Duration, Instant};
+/// use platoon::time::sleep_until;
 ///
 /// # platoon::block_on(async {
-/// platoon::sleep_until(Instant::now() + Duration::from_secs(1)).await;
+/// sleep_until(Instant::now() + Duration::from_secs(1)).await;
 /// println!("Hello after 1 second");
 /// # });
 /// ```
@@ -153,7 +154,7 @@ pub fn interval(interval: Duration) -> Interval {
 /// use platoon::time::interval_at;
 ///
 /// # platoon::block_on(async {
-/// let mut interval = interval_at(Instant::now() + Duration_from_secs(5), Duration::from_secs(1));
+/// let mut interval = interval_at(Instant::now() + Duration::from_secs(5), Duration::from_secs(1));
 ///
 /// interval.tick().await; // 5 secs
 /// interval.tick().await; // 6 secs
@@ -201,9 +202,9 @@ impl Interval {
 /// use std::time::Duration;
 /// use platoon::time::timeout;
 ///
-/// # async fn fetch_record() {}
+/// # async fn fetch_user() {}
 /// # platoon::block_on(async {
-/// match timeout(Duration_from_millis(5), fetch_user()) {
+/// match timeout(Duration::from_millis(5), fetch_user()).await {
 ///     Ok(user) => {
 ///         // ...
 ///     },
@@ -226,11 +227,11 @@ where
 ///
 /// ```
 /// use std::time::{Instant, Duration};
-/// use platoon::time::timeout;
+/// use platoon::time::timeout_at;
 ///
-/// # async fn fetch_record() {}
+/// # async fn fetch_user() {}
 /// # platoon::block_on(async {
-/// match timeout_at(Instant::now() + Duration_from_millis(5), fetch_user()) {
+/// match timeout_at(Instant::now() + Duration::from_millis(5), fetch_user()).await {
 ///     Ok(user) => {
 ///         // ...
 ///     },

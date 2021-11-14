@@ -4,18 +4,22 @@
 //! concurrently by [the runtime](crate::Runtime). You can spawn a
 //! task with the [`spawn`] function:
 //! ```rust
-//! platoon:spawn(async {
+//! # platoon::block_on(async {
+//! platoon::spawn(async {
 //!     // do some asynchronous work here
 //! });
+//! # });
 //! ```
 //!
 //! Spawning a task returns a [`JoinHandle`]. Awaiting this handle waits
 //! for this task to complete and returns it's output without blocking:
 //! ```rust
+//! # platoon::block_on(async {
 //! let handle = platoon::spawn(async {
 //!     1
-//! }).
-//! assert_eq!(handle.await, 1b);
+//! });
+//! assert_eq!(handle.await, 1);
+//! # });
 //! ```
 //!
 //! Spawning and immediately awaiting a task provides no benefit over awaiting
@@ -25,7 +29,6 @@
 //! ```no_run
 //! # async fn get_user() -> String { String::new() }
 //! # async fn get_client() -> String { String::new() }
-//! # async fn main() {
 //! # platoon::block_on(async {
 //! // Spawn a task to get the user, it will start running in the background
 //! let user_handle = platoon::spawn(async { get_user().await });
@@ -37,7 +40,6 @@
 //! // Now get the user by awaiting the handle
 //! let user = user_handle.await;
 //! # });
-//! # }
 //! ```
 //!
 //! If you do not need the result of a task, you can ignore the handle entirely.
@@ -71,7 +73,6 @@
 //! had already completed, it's output will be returned:
 //! ```no_run
 //! # use std::time::Duration;
-//! # async fn main() {
 //! # platoon::block_on(async {
 //! let task = platoon::spawn(async {
 //!     1
@@ -85,12 +86,11 @@
 //! });
 //!
 //! // let the runtime execute tasks
-//! platoon::time::sleep(Duration::from_milis(10)).await;
+//! platoon::time::sleep(Duration::from_millis(10)).await;
 //!
 //! // the task had completed
 //! assert_eq!(task.cancel(), Some(1));
 //! # });
-//! # }
 //! ```
 //!
 //! All spawned tasks are cancelled when the runtime is dropped (i.e: at the end
@@ -99,7 +99,7 @@
 //! # async fn do_something() {}
 //! # async fn do_something_else() {}
 //! platoon::block_on(async {
-//!     let tasks = Vec::new();
+//!     let mut tasks = Vec::new();
 //!
 //!     // spawn a task, adding the handle to the vector
 //!     tasks.push(platoon::spawn(async { do_something().await }));
@@ -111,7 +111,7 @@
 //!     }
 //!
 //!     // wait for all the tasks to complete
-//!     for tawsk in tasks {
+//!     for task in tasks {
 //!         let _ = task.await;
 //!     }
 //! });

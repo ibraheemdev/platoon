@@ -37,7 +37,7 @@ impl Runtime {
     /// # Examples
     ///
     /// ```rust
-    /// let runtime = Runtime::new().unwrap();
+    /// let runtime = platoon::Runtime::new().unwrap();
     /// {
     ///     let _enter = runtime.enter();
     ///     // spawn relies on the runtime context

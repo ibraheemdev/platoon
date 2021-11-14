@@ -308,14 +308,3 @@ mod poller {
 
     pub type SysEvent = libc::epoll_event;
 }
-
-macro_rules! cfg_unix {
-    ($($item:item)*) => { $(#[cfg(unix)] $item)* }
-}
-
-macro_rules! cfg_windows {
-    ($($item:item)*) => { $(#[cfg(windows)] $item)* }
-}
-
-pub(crate) use cfg_unix;
-pub(crate) use cfg_windows;
