@@ -6,3 +6,6 @@
 //! Note that all the types in this module are `!Send`, and as such do not
 //! have any multi-threaded synchronization overhead.
 pub mod oneshot;
+
+mod semaphore;
+pub use semaphore::Semaphore;

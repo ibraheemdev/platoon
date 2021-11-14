@@ -1,7 +1,5 @@
 //! Asynchronous timers.
 //!
-//! The timers in this module operate at millisecond granularity.
-//!
 //! # Examples
 //!
 //! ```no_run

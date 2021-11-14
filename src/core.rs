@@ -103,13 +103,12 @@ impl Core {
 
                 let had_interest = interest.has_interest();
 
-                if let Some(waker) = interest.poller.take() {
+                if let Some(ref waker) = interest.poller {
                     if waker.will_wake(cx.waker()) {
-                        interest.poller = Some(waker);
                         return Poll::Pending;
                     }
 
-                    previous = Some(waker);
+                    previous = interest.poller.take();
                 }
 
                 interest.poller = Some(cx.waker().clone());
