@@ -15,3 +15,5 @@ pub use self::{
     task::spawn,
     time::sleep,
 };
+
+pub use futures_io as io;
