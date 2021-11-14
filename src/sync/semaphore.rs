@@ -1,8 +1,8 @@
-use crate::util::{poll_fn, LocalCell, UsizeHasher};
+use crate::util::{poll_fn, LocalCell};
 
-use std::collections::HashMap;
-use std::hash::BuildHasherDefault;
 use std::task::{Context, Poll, Waker};
+
+use slab::Slab;
 
 pub struct Semaphore {
     inner: LocalCell<Inner>,
@@ -10,19 +10,13 @@ pub struct Semaphore {
 
 pub struct Inner {
     permits: usize,
-    waiters: HashMap<usize, Entry, BuildHasherDefault<UsizeHasher>>,
+    entries: Slab<Entry>,
 }
 
 struct Entry {
     waker: Option<Waker>,
     required: usize,
-    state: State,
-}
-
-#[derive(PartialEq)]
-enum State {
-    Waiting,
-    Notified,
+    notified: bool,
 }
 
 impl Semaphore {
@@ -30,7 +24,7 @@ impl Semaphore {
         Semaphore {
             inner: LocalCell::new(Inner {
                 permits,
-                waiters: HashMap::default(),
+                entries: Slab::new(),
             }),
         }
     }
@@ -106,57 +100,50 @@ impl Inner {
                 if self.try_acquire(permits) {
                     Poll::Ready(())
                 } else {
-                    let next = self.waiters.len();
-                    self.waiters.insert(
-                        next,
-                        Entry {
-                            waker: Some(cx.waker().clone()),
-                            state: State::Waiting,
-                            required: permits,
-                        },
-                    );
-                    *entry = Some(next);
+                    let key = self.entries.insert(Entry {
+                        waker: Some(cx.waker().clone()),
+                        required: permits,
+                        notified: false,
+                    });
+                    *entry = Some(key);
                     Poll::Pending
                 }
             }
             Some(i) => {
                 let entry = self
-                    .waiters
-                    .get_mut(i)
+                    .entries
+                    .get_mut(*i)
                     .expect("future polled after completion");
 
-                match entry.state {
-                    State::Waiting => {
-                        match &mut entry.waker {
-                            Some(w) if w.will_wake(cx.waker()) => {}
-                            _ => {
-                                entry.waker = Some(cx.waker().clone());
-                            }
+                if entry.notified {
+                    assert!(self.permits >= entry.required);
+                    self.permits -= entry.required;
+
+                    self.entries.remove(*i);
+                    self.notify_last();
+
+                    Poll::Ready(())
+                } else {
+                    match &mut entry.waker {
+                        Some(w) if w.will_wake(cx.waker()) => {}
+                        _ => {
+                            entry.waker = Some(cx.waker().clone());
                         }
-                        Poll::Pending
                     }
-                    State::Notified => {
-                        assert!(self.permits >= entry.required);
-                        self.permits -= entry.required;
-
-                        self.waiters.remove(i).unwrap();
-                        self.notify_last();
-
-                        Poll::Ready(())
-                    }
+                    Poll::Pending
                 }
             }
         }
     }
 
     fn notify_last(&mut self) {
-        if let Some(entry) = self.waiters.get_mut(&(self.waiters.len() - 1)) {
+        if let Some(entry) = self.entries.get_mut(self.entries.len() - 1) {
             if self.permits < entry.required {
                 return;
             }
 
-            if entry.state != State::Notified {
-                entry.state = State::Notified;
+            if !entry.notified {
+                entry.notified = true;
 
                 if let Some(waker) = &entry.waker {
                     waker.wake_by_ref();
@@ -166,7 +153,7 @@ impl Inner {
     }
 
     fn try_acquire(&mut self, required: usize) -> bool {
-        if (self.permits >= required) && (self.waiters.is_empty() || required == 0) {
+        if (self.permits >= required) && (self.entries.is_empty() || required == 0) {
             self.permits -= required;
             true
         } else {

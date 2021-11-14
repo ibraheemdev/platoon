@@ -1,9 +1,8 @@
 use crate::sys::{AsRaw, Event, Poller, Raw, SysEvent};
 use crate::util::{self, LocalCell};
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::hash::BuildHasherDefault;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -12,20 +11,22 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 use std::{io, mem};
 
+use slab::Slab;
+
 #[derive(Clone)]
 pub struct Core {
     shared: Rc<LocalCell<Shared>>,
 }
 
 struct Shared {
-    next_id: usize,
     poller: Poller,
     queue: VecDeque<Task>,
     events: Vec<SysEvent>,
     woke_up: bool,
     created_on: ThreadId,
+    next_alarm: usize,
     alarms: BTreeMap<(Instant, usize), Waker>,
-    sources: HashMap<usize, Source, BuildHasherDefault<util::UsizeHasher>>,
+    sources: Slab<Source>,
 }
 
 const POLLS_PER_TICK: usize = 61;
@@ -37,14 +38,14 @@ impl Core {
     pub fn new() -> io::Result<Self> {
         Ok(Core {
             shared: Rc::new(LocalCell::new(Shared {
-                next_id: 0,
                 poller: Poller::new()?,
                 queue: VecDeque::with_capacity(INITIAL_TASKS),
                 events: Vec::with_capacity(INITIAL_EVENTS),
                 woke_up: false,
                 created_on: thread::current().id(),
+                next_alarm: 0,
                 alarms: BTreeMap::new(),
-                sources: HashMap::with_capacity_and_hasher(INITIAL_SOURCES, Default::default()),
+                sources: Slab::with_capacity(INITIAL_SOURCES),
             })),
         })
     }
@@ -52,7 +53,9 @@ impl Core {
     pub fn insert_source(&self, raw: &impl AsRaw) -> io::Result<usize> {
         unsafe {
             self.shared.with(|s| {
-                let key = s.sources.len();
+                let entry = s.sources.vacant_entry();
+                let key = entry.key();
+
                 s.poller.add(
                     raw.as_raw(),
                     Event {
@@ -60,15 +63,13 @@ impl Core {
                         ..Default::default()
                     },
                 )?;
-                s.sources.insert(
+                entry.insert(Source {
+                    raw: raw.as_raw(),
                     key,
-                    Source {
-                        raw: raw.as_raw(),
-                        key,
-                        read: Default::default(),
-                        write: Default::default(),
-                    },
-                );
+                    read: Default::default(),
+                    write: Default::default(),
+                });
+
                 Ok(key)
             })
         }
@@ -77,7 +78,7 @@ impl Core {
     pub fn remove_source(&self, key: usize) -> io::Result<()> {
         unsafe {
             self.shared.with(|s| {
-                let source = s.sources.remove(&key).unwrap();
+                let source = s.sources.remove(key);
                 s.poller.delete(source.raw)
             })
         }
@@ -93,7 +94,7 @@ impl Core {
 
         let poll = unsafe {
             self.shared.with(|s| {
-                let source = s.sources.get_mut(&key).unwrap();
+                let source = s.sources.get_mut(key).unwrap();
                 let interest = source.interest(direction);
 
                 if interest.woke_up {
@@ -142,9 +143,9 @@ impl Core {
     pub fn insert_alarm(&self, at: Instant, waker: Waker) -> usize {
         unsafe {
             self.shared.with(|s| {
-                let id = s.next_id;
+                let id = s.next_alarm;
                 s.alarms.insert((at, id), waker);
-                s.next_id += 1;
+                s.next_alarm += 1;
                 id
             })
         }
@@ -290,7 +291,7 @@ impl Shared {
             Ok(0) => {}
             Ok(_) => {
                 for e in self.events.iter().map(Event::from) {
-                    if let Some(source) = self.sources.get_mut(&e.key) {
+                    if let Some(source) = self.sources.get_mut(e.key) {
                         if e.readable {
                             source.read.take(&mut wakers);
                         }

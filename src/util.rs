@@ -27,25 +27,6 @@ where
     PollFn(f).await
 }
 
-#[derive(Default)]
-pub struct UsizeHasher(usize);
-
-impl Hasher for UsizeHasher {
-    fn write(&mut self, _: &[u8]) {
-        unreachable!()
-    }
-
-    #[inline]
-    fn write_usize(&mut self, id: usize) {
-        self.0 = id;
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0 as _
-    }
-}
-
 pub fn wake(waker: Waker) {
     #[cfg(debug_assertions)]
     {
