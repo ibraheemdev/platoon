@@ -113,7 +113,7 @@ macro_rules! from_into_std {
 }
 
 macro_rules! async_read_write {
-    ($($ty:ty),* | close: |$this:pat| $close:block) => {$(
+    ($($ty:ty),*) => {$(
         #[allow(unused_lifetimes)]
         impl<'a> futures_io::AsyncRead for $ty {
             fn poll_read(
@@ -168,10 +168,9 @@ macro_rules! async_read_write {
 
             fn poll_close(
                 self: std::pin::Pin<&mut Self>,
-                _: &mut std::task::Context<'_>,
+                cx: &mut std::task::Context<'_>,
             ) -> std::task::Poll<std::io::Result<()>> {
-                let $this = self;
-                $close
+                self._poll_close(cx)
             }
         }
     )*};

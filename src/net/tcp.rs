@@ -209,12 +209,12 @@ impl TcpStream {
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
         self.0.sys().set_ttl(ttl)
     }
+
+    fn _poll_close(&self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(self.0.sys().shutdown(net::Shutdown::Write))
+    }
 }
 
 as_raw! { TcpStream }
 from_into_std! { "stream": TcpStream => std::net::TcpStream }
-async_read_write! {
-    TcpStream, &'a TcpStream | close: |s| {
-        Poll::Ready(s.0.sys().shutdown(std::net::Shutdown::Write))
-    }
-}
+async_read_write! { TcpStream, &'a TcpStream }
