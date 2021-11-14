@@ -1,6 +1,5 @@
 use std::cell::UnsafeCell;
 use std::future::Future;
-use std::hash::Hasher;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};

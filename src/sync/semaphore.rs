@@ -170,7 +170,8 @@ impl Inner {
     }
 
     fn notify_last(&mut self) {
-        if let Some(entry) = self.entries.get_mut(self.entries.len() - 1) {
+        let last = self.entries.len().checked_sub(1).unwrap_or(0);
+        if let Some(entry) = self.entries.get_mut(last) {
             if self.permits < entry.required {
                 return;
             }
