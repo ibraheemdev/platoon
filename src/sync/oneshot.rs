@@ -23,6 +23,7 @@
 use crate::util;
 
 use std::cell::Cell;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -162,4 +163,13 @@ impl<T> Drop for Receiver<T> {
 /// Error returned by a [`Receiver`] if the channel
 /// has been closed (i.e: the associated sender has
 /// been dropped);
+#[derive(Debug, PartialEq, Eq)]
 pub struct Closed;
+
+impl fmt::Display for Closed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "oneshot channel closed")
+    }
+}
+
+impl std::error::Error for Closed {}
