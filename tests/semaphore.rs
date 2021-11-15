@@ -1,10 +1,98 @@
 use platoon::sync::Semaphore;
 use std::rc::Rc;
+use tokio_test::task::spawn;
+use tokio_test::{assert_pending, assert_ready};
 
 #[test]
 fn no_permits() {
-    // this should not panic
     Semaphore::new(0);
+}
+
+#[test]
+fn fairness() {
+    let sem = Semaphore::new(10);
+
+    let mut t1 = spawn(sem.acquire(6));
+    let _g1 = assert_ready!(t1.poll());
+
+    let mut t2 = spawn(sem.acquire(2));
+    let _g2 = assert_ready!(t2.poll());
+
+    let mut t3 = spawn(sem.acquire(100));
+    assert_pending!(t3.poll());
+
+    let mut t4 = spawn(sem.acquire(2));
+    assert_pending!(t4.poll());
+
+    let mut t5 = spawn(sem.acquire(2));
+    assert_pending!(t5.poll());
+
+    let mut t6 = spawn(sem.acquire(2));
+    assert_pending!(t6.poll());
+
+    drop(t3);
+
+    dbg!(t4.is_woken());
+    dbg!(t5.is_woken());
+    dbg!(t6.is_woken());
+    assert!(t4.is_woken());
+    let g4 = assert_ready!(t4.poll());
+
+    assert_pending!(t5.poll());
+    assert_pending!(t6.poll());
+
+    drop(g4);
+
+    assert!(t5.is_woken());
+    let g5 = assert_ready!(t5.poll());
+
+    assert_pending!(t6.poll());
+
+    drop(g5);
+
+    assert!(t6.is_woken());
+    assert_ready!(t6.poll());
+}
+
+#[test]
+fn wake_all() {
+    let sem = Semaphore::new(10);
+
+    let mut t1 = spawn(sem.acquire(10));
+    let g1 = assert_ready!(t1.poll());
+
+    let mut t2 = spawn(sem.acquire(2));
+    assert_pending!(t2.poll());
+    let mut t3 = spawn(sem.acquire(2));
+    assert_pending!(t3.poll());
+    let mut t4 = spawn(sem.acquire(2));
+    assert_pending!(t4.poll());
+    let mut t5 = spawn(sem.acquire(2));
+    assert_pending!(t5.poll());
+    let mut t6 = spawn(sem.acquire(2));
+    assert_pending!(t6.poll());
+    let mut t7 = spawn(sem.acquire(1));
+    assert_pending!(t7.poll());
+
+    drop(g1);
+
+    assert!(t2.is_woken());
+
+    assert!(t3.is_woken());
+    let _g3 = assert_ready!(t3.poll());
+    assert!(t4.is_woken());
+    let _g4 = assert_ready!(t4.poll());
+    assert!(t5.is_woken());
+    let _g5 = assert_ready!(t5.poll());
+    assert!(t6.is_woken());
+    let _g6 = assert_ready!(t6.poll());
+
+    assert!(!t7.is_woken());
+    assert_pending!(t7.poll());
+
+    drop(t2);
+    assert!(t7.is_woken());
+    assert_ready!(t7.poll());
 }
 
 #[test]
