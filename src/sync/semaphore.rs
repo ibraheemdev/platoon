@@ -12,6 +12,7 @@ pub struct Semaphore {
 
 pub struct Inner {
     permits: usize,
+    last_entry: usize,
     entries: Slab<Entry>,
 }
 
@@ -32,6 +33,7 @@ impl Semaphore {
         Semaphore {
             inner: LocalCell::new(Inner {
                 permits,
+                last_entry: 0,
                 entries: Slab::new(),
             }),
         }
@@ -63,7 +65,12 @@ impl Semaphore {
         impl Drop for Acquire<'_> {
             fn drop(&mut self) {
                 if let AcquireState::Waiting(entry) = self.state {
-                    unsafe { self.semaphore.inner.with(|i| i.entries.remove(entry)) };
+                    unsafe {
+                        self.semaphore.inner.with(|i| {
+                            i.entries.remove(entry);
+                            i.notify();
+                        })
+                    }
                 }
             }
         }
@@ -99,7 +106,7 @@ impl Semaphore {
         unsafe {
             self.inner.with(|i| {
                 i.permits += permits;
-                i.notify_last();
+                i.notify();
             })
         }
     }
@@ -139,6 +146,7 @@ impl Inner {
                         required: permits,
                         notified: false,
                     });
+                    self.last_entry = key;
                     *state = AcquireState::Waiting(key);
                     Poll::Pending
                 }
@@ -151,7 +159,7 @@ impl Inner {
                     self.permits -= entry.required;
 
                     self.entries.remove(*i);
-                    self.notify_last();
+                    self.notify();
 
                     *state = AcquireState::Done;
                     Poll::Ready(())
@@ -169,9 +177,9 @@ impl Inner {
         }
     }
 
-    fn notify_last(&mut self) {
-        let last = self.entries.len().saturating_sub(1);
-        if let Some(entry) = self.entries.get_mut(last) {
+    // TODO: potentially notify more than one waiter here
+    fn notify(&mut self) {
+        if let Some(entry) = self.entries.get_mut(self.last_entry) {
             if self.permits < entry.required {
                 return;
             }

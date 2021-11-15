@@ -10,9 +10,11 @@ pub struct RwLock<T> {
 }
 
 impl<T> RwLock<T> {
+    const PERMITS: usize = usize::MAX;
+
     pub fn new(value: T) -> Self {
         Self {
-            semaphore: Semaphore::new(usize::MAX),
+            semaphore: Semaphore::new(Self::PERMITS),
             value: UnsafeCell::new(value),
         }
     }
@@ -29,13 +31,13 @@ impl<T> RwLock<T> {
     }
 
     pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
-        let permit = self.semaphore.acquire(self.semaphore.permits()).await;
+        let permit = self.semaphore.acquire(Self::PERMITS).await;
         RwLockWriteGuard { lock: self, permit }
     }
 
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         self.semaphore
-            .try_acquire(self.semaphore.permits())
+            .try_acquire(Self::PERMITS)
             .map(|permit| RwLockWriteGuard { lock: self, permit })
     }
 

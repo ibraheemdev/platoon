@@ -8,8 +8,9 @@
 pub mod oneshot;
 
 mod mutex;
-mod semaphore;
 mod rwlock;
+mod semaphore;
 
 pub use mutex::{Mutex, MutexGuard};
+pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{Permit, Semaphore};
