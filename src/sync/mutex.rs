@@ -1,5 +1,5 @@
-use core::fmt;
 use std::cell::UnsafeCell;
+use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
 
 use super::{Permit, Semaphore};
@@ -7,12 +7,6 @@ use super::{Permit, Semaphore};
 pub struct Mutex<T> {
     semaphore: Semaphore,
     value: UnsafeCell<T>,
-}
-
-pub struct MutexGuard<'a, T> {
-    lock: &'a Mutex<T>,
-    #[allow(dead_code)]
-    permit: Permit<'a>,
 }
 
 impl<T> Mutex<T> {
@@ -43,6 +37,23 @@ impl<T> Mutex<T> {
     }
 }
 
+impl<T: Debug> Debug for Mutex<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Mutex");
+        match self.try_lock() {
+            Some(inner) => d.field("data", &&*inner),
+            None => d.field("data", &format_args!("<locked>")),
+        };
+        d.finish_non_exhaustive()
+    }
+}
+
+pub struct MutexGuard<'a, T> {
+    lock: &'a Mutex<T>,
+    #[allow(dead_code)]
+    permit: Permit<'a>,
+}
+
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -56,8 +67,14 @@ impl<T> DerefMut for MutexGuard<'_, T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for MutexGuard<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <T as fmt::Debug>::fmt(self, f)
+impl<T: Debug> Debug for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <T as Debug>::fmt(&*self, f)
+    }
+}
+
+impl<T: Display> Display for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <T as Display>::fmt(&*self, f)
     }
 }
