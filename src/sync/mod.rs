@@ -7,5 +7,8 @@
 //! have any multi-threaded synchronization overhead.
 pub mod oneshot;
 
+mod mutex;
 mod semaphore;
-pub use semaphore::Semaphore;
+
+pub use mutex::Mutex;
+pub use semaphore::{Permit, Semaphore};

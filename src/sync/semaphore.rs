@@ -37,7 +37,7 @@ impl Semaphore {
         }
     }
 
-    pub async fn acquire(&self, permits: usize) -> Release<'_> {
+    pub async fn acquire(&self, permits: usize) -> Permit<'_> {
         struct Acquire<'a> {
             semaphore: &'a Semaphore,
             state: AcquireState,
@@ -45,14 +45,14 @@ impl Semaphore {
         }
 
         impl<'a> Future for Acquire<'a> {
-            type Output = Release<'a>;
+            type Output = Permit<'a>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 unsafe {
                     self.semaphore
                         .inner
                         .with(|i| i.poll_acquire(self.permits, &mut self.state, cx))
-                        .map(|_| Release {
+                        .map(|_| Permit {
                             semaphore: self.semaphore,
                             permits: self.permits,
                         })
@@ -76,10 +76,10 @@ impl Semaphore {
         .await
     }
 
-    pub fn try_acquire(&self, permits: usize) -> Option<Release<'_>> {
+    pub fn try_acquire(&self, permits: usize) -> Option<Permit<'_>> {
         unsafe {
             self.inner.with(|i| {
-                i.try_acquire(permits).then(|| Release {
+                i.try_acquire(permits).then(|| Permit {
                     semaphore: self,
                     permits,
                 })
@@ -105,18 +105,18 @@ impl Semaphore {
     }
 }
 
-pub struct Release<'a> {
+pub struct Permit<'a> {
     semaphore: &'a Semaphore,
     permits: usize,
 }
 
-impl Release<'_> {
+impl Permit<'_> {
     pub fn forget(mut self) {
         self.permits = 0;
     }
 }
 
-impl Drop for Release<'_> {
+impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.semaphore.add_permits(self.permits);
     }
