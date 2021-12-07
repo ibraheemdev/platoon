@@ -1,3 +1,4 @@
+
 use crate::util::LocalCell;
 
 use std::future::Future;
@@ -189,7 +190,6 @@ impl Inner {
 
     fn wake(&mut self) {
         if let Some(waiter) = self.waiters.peek_last() {
-            dbg!(&waiter);
             if self.permits < waiter.required {
                 return;
             }
