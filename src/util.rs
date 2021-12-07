@@ -54,10 +54,6 @@ impl<T> LocalCell<T> {
         }
     }
 
-    pub unsafe fn unchecked(&self) -> &mut T {
-        &mut *self.value.get()
-    }
-
     pub fn cloned(&self) -> T
     where
         T: Clone,
