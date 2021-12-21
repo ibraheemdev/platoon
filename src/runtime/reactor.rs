@@ -55,7 +55,6 @@ impl Reactor {
 
         entry.insert(Source {
             raw: raw.as_raw(),
-            key,
             reader: Interest::default(),
             writer: Interest::default(),
         });
@@ -82,12 +81,12 @@ impl Reactor {
         let source = sources.get_mut(key).unwrap();
         let interest = source.interest(direction);
 
-        if interest.woke_up {
-            interest.woke_up = false;
+        if interest.woke {
+            interest.woke = false;
             return Poll::Ready(Ok(()));
         }
 
-        let had_interest = interest.has_waiters();
+        let had_poller = interest.has_poller();
 
         if let Some(ref waker) = interest.poller {
             if waker.will_wake(cx.waker()) {
@@ -99,25 +98,25 @@ impl Reactor {
 
         interest.poller = Some(cx.waker().clone());
 
-        if !had_interest {
-            Self::update_interest(&poller, source)?;
+        if !had_poller {
+            Reactor::update_interest(&poller, key, source)?;
         }
 
         Poll::Pending
     }
 
-    fn update_interest(poller: &Poller, source: &Source) -> io::Result<()> {
+    fn update_interest(poller: &Poller, key: usize, source: &Source) -> io::Result<()> {
         poller.update(
             source.raw,
             Event {
-                key: source.key,
-                readable: source.reader.has_waiters(),
-                writable: source.writer.has_waiters(),
+                key,
+                readable: source.reader.has_poller(),
+                writable: source.writer.has_poller(),
             },
         )
     }
 
-    fn poll(&self, timeout: Option<Duration>, mut wakers: &mut Vec<Waker>) -> io::Result<()> {
+    fn poll(&self, timeout: Option<Duration>, wakers: &mut Vec<Waker>) -> io::Result<()> {
         let Shared {
             events,
             poller,
@@ -131,22 +130,22 @@ impl Reactor {
                 for e in events.iter().map(Event::from) {
                     if let Some(source) = sources.get_mut(e.key) {
                         if e.readable {
-                            source.reader.take(&mut wakers);
+                            source.reader.take(wakers);
                         }
 
                         if e.writable {
-                            source.writer.take(&mut wakers);
+                            source.writer.take(wakers);
                         }
 
-                        if source.reader.has_waiters() || source.writer.has_waiters() {
-                            Reactor::update_interest(&poller, source)?;
+                        if source.reader.has_poller() || source.writer.has_poller() {
+                            Reactor::update_interest(&poller, e.key, source)?;
                         }
                     }
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) => return Err(err),
-        };
+        }
 
         Ok(())
     }
@@ -162,9 +161,14 @@ impl Park for Reactor {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Direction {
+    Read,
+    Write,
+}
+
 struct Source {
     raw: Raw,
-    key: usize,
     reader: Interest,
     writer: Interest,
 }
@@ -178,37 +182,22 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum Direction {
-    Read,
-    Write,
-}
-
 #[derive(Default)]
 struct Interest {
     poller: Option<Waker>,
-    awaiters: Vec<Option<Waker>>,
-    woke_up: bool,
+    woke: bool,
 }
 
 impl Interest {
-    fn waiters(&self) -> usize {
-        self.poller.is_some() as usize + self.awaiters.len()
-    }
-
-    fn has_waiters(&self) -> bool {
-        self.waiters() != 0
+    fn has_poller(&self) -> bool {
+        self.poller.is_some()
     }
 
     fn take(&mut self, wakers: &mut Vec<Waker>) {
-        wakers.reserve(self.waiters());
-        wakers.extend(
-            self.awaiters
-                .iter_mut()
-                .filter_map(Option::take)
-                .chain(self.poller.take()),
-        );
+        if let Some(waker) = self.poller.take() {
+            wakers.push(waker);
+        }
 
-        self.woke_up = true;
+        self.woke = true;
     }
 }
