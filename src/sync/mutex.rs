@@ -1,4 +1,4 @@
-use std::cell::UnsafeCell;
+use std::cell::{RefCell, RefMut};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
 
@@ -6,26 +6,30 @@ use super::{Permit, Semaphore};
 
 pub struct Mutex<T> {
     semaphore: Semaphore,
-    value: UnsafeCell<T>,
+    value: RefCell<T>,
 }
 
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Self {
         Self {
             semaphore: Semaphore::new(1),
-            value: UnsafeCell::new(value),
+            value: RefCell::new(value),
         }
     }
 
     pub async fn lock(&self) -> MutexGuard<'_, T> {
         let permit = self.semaphore.acquire(1).await;
-        MutexGuard { lock: self, permit }
+        MutexGuard {
+            value: self.value.borrow_mut(),
+            permit,
+        }
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.semaphore
-            .try_acquire(1)
-            .map(|permit| MutexGuard { lock: self, permit })
+        self.semaphore.try_acquire(1).map(|permit| MutexGuard {
+            value: self.value.borrow_mut(),
+            permit,
+        })
     }
 
     pub fn get_mut(&mut self) -> &mut T {
@@ -49,7 +53,7 @@ impl<T: Debug> Debug for Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T> {
-    lock: &'a Mutex<T>,
+    value: RefMut<'a, T>,
     #[allow(dead_code)]
     permit: Permit<'a>,
 }
@@ -57,13 +61,13 @@ pub struct MutexGuard<'a, T> {
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.value.get() }
+        &*self.value
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.value.get() }
+        &mut *self.value
     }
 }
 

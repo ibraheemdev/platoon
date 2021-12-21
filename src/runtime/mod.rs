@@ -1,12 +1,20 @@
-use crate::core::Core;
-use crate::task::JoinHandle;
-use crate::util::LocalCell;
+mod clock;
+mod executor;
+mod park;
+mod reactor;
 
+pub(crate) use self::executor::Task;
+pub(crate) use self::park::Park;
+pub(crate) use self::reactor::Direction;
+
+use crate::task::JoinHandle;
+
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 
 thread_local! {
-    static RUNTIME: LocalCell<Option<Runtime>> = LocalCell::new(None);
+    static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
 }
 
 /// The platoon runtime.
@@ -21,13 +29,23 @@ thread_local! {
 /// [`TcpStream::connect`]: crate::net::TcpStream::connect
 #[derive(Clone)]
 pub struct Runtime {
-    pub(crate) core: Core,
+    pub(crate) reactor: reactor::Reactor,
+    pub(crate) clock: clock::Clock<reactor::Reactor>,
+    pub(crate) executor: executor::Executor<clock::Clock<reactor::Reactor>>,
 }
 
 impl Runtime {
     /// Create a new runtime.
     pub fn new() -> io::Result<Self> {
-        Core::new().map(|core| Self { core })
+        let reactor = reactor::Reactor::new()?;
+        let clock = clock::Clock::new(reactor.clone())?;
+        let scheduler = executor::Executor::new(clock.clone())?;
+
+        Ok(Self {
+            reactor,
+            clock,
+            executor: scheduler,
+        })
     }
 
     /// Enter the runtime context.
@@ -65,7 +83,7 @@ impl Runtime {
 
     /// Returns the current runtime if set.
     pub fn current() -> Option<Self> {
-        RUNTIME.with(LocalCell::cloned)
+        RUNTIME.with(|r| (*r.borrow()).clone())
     }
 
     pub(crate) fn unwrap_current() -> Self {
@@ -82,7 +100,7 @@ impl Runtime {
         F: Future + 'static,
         F::Output: 'static,
     {
-        unsafe { JoinHandle::new(self.core.spawn(future)) }
+        JoinHandle::new(self.executor.spawn(future))
     }
 
     /// Runs the provided future to completion.
@@ -94,7 +112,7 @@ impl Runtime {
     where
         F: Future,
     {
-        self.core.block_on(async move {
+        self.executor.block_on(async move {
             let _enter = self.enter();
             future.await
         })

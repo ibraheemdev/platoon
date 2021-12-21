@@ -115,9 +115,11 @@ mod poller {
 
     impl Poller {
         pub fn new() -> io::Result<Self> {
-            syscall!(kqueue())
-                .and_then(|fd| syscall!(fcntl(fd, F_SETFD, FD_CLOEXEC)).map(|_| fd))
-                .map(|fd| Self { fd })
+            unsafe {
+                syscall!(kqueue())
+                    .and_then(|fd| syscall!(fcntl(fd, F_SETFD, FD_CLOEXEC)).map(|_| fd))
+                    .map(|fd| Self { fd })
+            }
         }
 
         pub fn poll(
@@ -131,20 +133,22 @@ mod poller {
             });
 
             events.clear();
-            syscall!(kevent(
-                self.fd,
-                std::ptr::null(),
-                0,
-                events.as_mut_ptr(),
-                events.capacity() as _,
-                timeout
-                    .map(|s| &s as *const _)
-                    .unwrap_or(std::ptr::null_mut())
-            ))
-            .map(|n| {
-                unsafe { events.set_len(n as _) };
-                n as _
-            })
+            unsafe {
+                syscall!(kevent(
+                    self.fd,
+                    std::ptr::null(),
+                    0,
+                    events.as_mut_ptr(),
+                    events.capacity() as _,
+                    timeout
+                        .map(|s| &s as *const _)
+                        .unwrap_or(std::ptr::null_mut())
+                ))
+                .map(|n| {
+                    events.set_len(n as _);
+                    n as _
+                })
+            }
         }
 
         pub fn add(&self, fd: RawFd, event: Event) -> io::Result<()> {
@@ -161,14 +165,16 @@ mod poller {
                 kchange(fd, event.writable, EVFILT_WRITE, event.key),
             ];
 
-            syscall!(kevent(
-                self.fd,
-                changes.as_ptr(),
-                changes.len() as _,
-                changes.as_mut_ptr(),
-                changes.len() as _,
-                std::ptr::null(),
-            ))?;
+            unsafe {
+                syscall!(kevent(
+                    self.fd,
+                    changes.as_ptr(),
+                    changes.len() as _,
+                    changes.as_mut_ptr(),
+                    changes.len() as _,
+                    std::ptr::null(),
+                ))?;
+            }
 
             for event in &changes {
                 if (event.flags & EV_ERROR) != 0
@@ -188,7 +194,7 @@ mod poller {
 
     impl Drop for Poller {
         fn drop(&mut self) {
-            let _ = syscall!(close(self.fd));
+            let _ = unsafe { syscall!(close(self.fd)) };
         }
     }
 
@@ -237,21 +243,23 @@ mod poller {
 
     impl Poller {
         pub fn new() -> io::Result<Self> {
-            syscall!(epoll_create1(EPOLL_CLOEXEC)).map(|fd| Self { fd })
+            unsafe { syscall!(epoll_create1(EPOLL_CLOEXEC)).map(|fd| Self { fd }) }
         }
 
         pub fn add(&self, fd: RawFd, event: Event) -> io::Result<()> {
             let mut event = event.into();
-            syscall!(epoll_ctl(self.fd, EPOLL_CTL_ADD, fd, &mut event as _)).map(drop)
+            unsafe { syscall!(epoll_ctl(self.fd, EPOLL_CTL_ADD, fd, &mut event as _)).map(drop) }
         }
 
         pub fn update(&self, fd: RawFd, event: Event) -> io::Result<()> {
             let mut event = event.into();
-            syscall!(epoll_ctl(self.fd, EPOLL_CTL_MOD, fd, &mut event as _)).map(drop)
+            unsafe { syscall!(epoll_ctl(self.fd, EPOLL_CTL_MOD, fd, &mut event as _)).map(drop) }
         }
 
         pub fn delete(&self, fd: RawFd) -> io::Result<()> {
-            syscall!(epoll_ctl(self.fd, EPOLL_CTL_DEL, fd, std::ptr::null_mut())).map(drop)
+            unsafe {
+                syscall!(epoll_ctl(self.fd, EPOLL_CTL_DEL, fd, std::ptr::null_mut())).map(drop)
+            }
         }
 
         pub fn poll(
@@ -261,22 +269,24 @@ mod poller {
         ) -> io::Result<usize> {
             let timeout = timeout.map(|to| to.as_millis() as c_int).unwrap_or(-1);
 
-            syscall!(epoll_wait(
-                self.fd,
-                events.as_mut_ptr(),
-                events.capacity() as _,
-                timeout,
-            ))
-            .map(|n| unsafe {
-                events.set_len(n as _);
-                n as _
-            })
+            unsafe {
+                syscall!(epoll_wait(
+                    self.fd,
+                    events.as_mut_ptr(),
+                    events.capacity() as _,
+                    timeout,
+                ))
+                .map(|n| {
+                    events.set_len(n as _);
+                    n as _
+                })
+            }
         }
     }
 
     impl Drop for Poller {
         fn drop(&mut self) {
-            let _ = syscall!(close(self.fd));
+            let _ = unsafe { syscall!(close(self.fd)) };
         }
     }
 

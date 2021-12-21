@@ -1,5 +1,4 @@
-use crate::util::LocalCell;
-
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
@@ -7,7 +6,7 @@ use std::task::{Context, Poll, Waker};
 use slab::Slab;
 
 pub struct Semaphore {
-    inner: LocalCell<Inner>,
+    inner: RefCell<Inner>,
 }
 
 pub struct Inner {
@@ -35,7 +34,7 @@ enum AcquireState {
 impl Semaphore {
     pub fn new(permits: usize) -> Self {
         Semaphore {
-            inner: LocalCell::new(Inner {
+            inner: RefCell::new(Inner {
                 permits,
                 head: None,
                 tail: None,
@@ -55,27 +54,23 @@ impl Semaphore {
             type Output = Permit<'a>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                unsafe {
-                    self.semaphore
-                        .inner
-                        .with(|i| i.poll_acquire(self.permits, &mut self.state, cx))
-                        .map(|_| Permit {
-                            semaphore: self.semaphore,
-                            permits: self.permits,
-                        })
-                }
+                self.semaphore
+                    .inner
+                    .borrow_mut()
+                    .poll_acquire(self.permits, &mut self.state, cx)
+                    .map(|_| Permit {
+                        semaphore: self.semaphore,
+                        permits: self.permits,
+                    })
             }
         }
 
         impl Drop for Acquire<'_> {
             fn drop(&mut self) {
                 if let AcquireState::Waiting(i) = self.state {
-                    unsafe {
-                        self.semaphore.inner.with(|inner| {
-                            inner.remove(i);
-                            inner.wake();
-                        })
-                    }
+                    let mut inner = self.semaphore.inner.borrow_mut();
+                    inner.remove(i);
+                    inner.wake();
                 }
             }
         }
@@ -89,18 +84,15 @@ impl Semaphore {
     }
 
     pub fn try_acquire(&self, permits: usize) -> Option<Permit<'_>> {
-        unsafe {
-            self.inner.with(|i| {
-                i.try_acquire(permits).then(|| Permit {
-                    semaphore: self,
-                    permits,
-                })
-            })
-        }
+        let mut inner = self.inner.borrow_mut();
+        inner.try_acquire(permits).then(|| Permit {
+            semaphore: self,
+            permits,
+        })
     }
 
     pub fn permits(&self) -> usize {
-        unsafe { self.inner.with(|i| i.permits) }
+        self.inner.borrow().permits
     }
 
     pub fn add_permits(&self, permits: usize) {
@@ -108,12 +100,9 @@ impl Semaphore {
             return;
         }
 
-        unsafe {
-            self.inner.with(|i| {
-                i.permits += permits;
-                i.wake();
-            })
-        }
+        let mut inner = self.inner.borrow_mut();
+        inner.permits += permits;
+        inner.wake();
     }
 }
 
@@ -152,7 +141,7 @@ impl Inner {
         });
 
         if let Some(head) = self.head.replace(key) {
-            unsafe { self.waiters.get_unchecked_mut(head).prev = Some(key) }
+            self.waiters[head].prev = Some(key)
         }
 
         if self.tail.is_none() {
@@ -167,12 +156,12 @@ impl Inner {
 
         match waiter.prev {
             None => self.head = waiter.next,
-            Some(prev) => unsafe { self.waiters.get_unchecked_mut(prev).next = waiter.next },
+            Some(prev) => self.waiters[prev].next = waiter.next,
         }
 
         match waiter.next {
             None => self.tail = waiter.prev,
-            Some(next) => unsafe { self.waiters.get_unchecked_mut(next).prev = waiter.prev },
+            Some(next) => self.waiters[next].prev = waiter.prev,
         }
     }
 
@@ -193,7 +182,7 @@ impl Inner {
                 }
             }
             AcquireState::Waiting(i) => {
-                let waiter = unsafe { self.waiters.get_unchecked_mut(i) };
+                let waiter = &mut self.waiters[i];
 
                 if waiter.woke {
                     assert!(self.permits >= waiter.required);
@@ -223,7 +212,7 @@ impl Inner {
         let mut tail = self.tail;
 
         while let Some(waiter) = tail {
-            let waiter = unsafe { self.waiters.get_unchecked_mut(waiter) };
+            let waiter = &mut self.waiters[waiter];
 
             if permits < waiter.required {
                 break;

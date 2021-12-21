@@ -118,8 +118,7 @@
 //! ```
 //!
 //! [`cancel`]: JoinHandle::cancel
-use crate::core::Task;
-use crate::Runtime;
+use crate::runtime::{Runtime, Task};
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -145,9 +144,11 @@ pub struct JoinHandle<T> {
     _t: PhantomData<T>,
 }
 
-impl<T> JoinHandle<T> {
-    /// Safety: `T` must be the return type of the spawned future.
-    pub(crate) unsafe fn new(task: Task) -> JoinHandle<T> {
+impl<T> JoinHandle<T>
+where
+    T: 'static,
+{
+    pub(crate) fn new(task: Task) -> JoinHandle<T> {
         JoinHandle {
             task,
             _t: PhantomData,
@@ -158,17 +159,20 @@ impl<T> JoinHandle<T> {
     ///
     /// The task's output will be returned if it had already completed.
     pub fn cancel(self) -> Option<T> {
-        unsafe { self.task.cancel::<T>() }
+        self.task.cancel::<T>()
     }
 }
 
 impl<T> Unpin for JoinHandle<T> {}
 
-impl<T> Future for JoinHandle<T> {
+impl<T> Future for JoinHandle<T>
+where
+    T: 'static,
+{
     type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { Pin::new(&mut self.task).poll::<T>(cx) }
+        Pin::new(&mut self.task).poll::<T>(cx)
     }
 }
 

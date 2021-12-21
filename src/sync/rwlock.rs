@@ -1,12 +1,12 @@
 use super::{Permit, Semaphore};
 
-use std::cell::UnsafeCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::{Deref, DerefMut};
 
 pub struct RwLock<T> {
     semaphore: Semaphore,
-    value: UnsafeCell<T>,
+    value: RefCell<T>,
 }
 
 impl<T> RwLock<T> {
@@ -15,30 +15,40 @@ impl<T> RwLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             semaphore: Semaphore::new(Self::PERMITS),
-            value: UnsafeCell::new(value),
+            value: RefCell::new(value),
         }
     }
 
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
         let permit = self.semaphore.acquire(1).await;
-        RwLockReadGuard { lock: self, permit }
+        RwLockReadGuard {
+            value: self.value.borrow(),
+            permit,
+        }
     }
 
     pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
-        self.semaphore
-            .try_acquire(1)
-            .map(|permit| RwLockReadGuard { lock: self, permit })
+        self.semaphore.try_acquire(1).map(|permit| RwLockReadGuard {
+            value: self.value.borrow(),
+            permit,
+        })
     }
 
     pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
         let permit = self.semaphore.acquire(Self::PERMITS).await;
-        RwLockWriteGuard { lock: self, permit }
+        RwLockWriteGuard {
+            value: self.value.borrow_mut(),
+            permit,
+        }
     }
 
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         self.semaphore
             .try_acquire(Self::PERMITS)
-            .map(|permit| RwLockWriteGuard { lock: self, permit })
+            .map(|permit| RwLockWriteGuard {
+                value: self.value.borrow_mut(),
+                permit,
+            })
     }
 
     pub fn get_mut(&mut self) -> &mut T {
@@ -62,7 +72,7 @@ impl<T: Debug> Debug for RwLock<T> {
 }
 
 pub struct RwLockReadGuard<'a, T> {
-    lock: &'a RwLock<T>,
+    value: Ref<'a, T>,
     #[allow(dead_code)]
     permit: Permit<'a>,
 }
@@ -71,7 +81,7 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.value.get() }
+        &*self.value
     }
 }
 
@@ -88,7 +98,7 @@ impl<T: Display> Display for RwLockReadGuard<'_, T> {
 }
 
 pub struct RwLockWriteGuard<'a, T> {
-    lock: &'a RwLock<T>,
+    value: RefMut<'a, T>,
     #[allow(dead_code)]
     permit: Permit<'a>,
 }
@@ -97,13 +107,13 @@ impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.value.get() }
+        &*self.value
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.value.get() }
+        &mut *self.value
     }
 }
 

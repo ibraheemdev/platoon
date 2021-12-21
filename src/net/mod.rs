@@ -2,7 +2,7 @@
 mod tcp;
 pub use tcp::{TcpListener, TcpStream};
 
-use crate::core::Direction;
+use crate::runtime::Direction;
 use crate::sys::AsRaw;
 use crate::{util, Runtime};
 
@@ -20,7 +20,7 @@ where
     T: AsRaw,
 {
     fn new(sys: T, runtime: Runtime) -> io::Result<Self> {
-        runtime.core.insert_source(&sys).map(|id| Self {
+        runtime.reactor.insert_source(&sys).map(|id| Self {
             id,
             sys: Some(sys),
             runtime,
@@ -29,7 +29,7 @@ where
 
     fn into_sys(mut self) -> io::Result<T> {
         let sys = self.sys.take().unwrap();
-        self.runtime.core.remove_source(self.id)?;
+        self.runtime.reactor.remove_source(self.id)?;
         Ok(sys)
     }
 
@@ -53,7 +53,7 @@ impl<T: AsRaw> Async<T> {
                 res => return res,
             }
 
-            util::poll_fn(|cx| self.runtime.core.poll_ready(self.id, direction, cx)).await?;
+            util::poll_fn(|cx| self.runtime.reactor.poll_ready(self.id, direction, cx)).await?;
         }
     }
 
@@ -71,7 +71,7 @@ impl<T: AsRaw> Async<T> {
 
             if self
                 .runtime
-                .core
+                .reactor
                 .poll_ready(self.id, direction, cx)?
                 .is_pending()
             {
@@ -84,7 +84,7 @@ impl<T: AsRaw> Async<T> {
 impl<T> Drop for Async<T> {
     fn drop(&mut self) {
         if self.sys.is_some() {
-            let _ = self.runtime.core.remove_source(self.id);
+            let _ = self.runtime.reactor.remove_source(self.id);
         }
     }
 }

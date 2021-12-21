@@ -1,6 +1,6 @@
 //! Asynchronous networking primitives.
 use super::{as_raw, async_read_write, from_into_std, Async};
-use crate::core::Direction;
+use crate::runtime::Direction;
 use crate::{sys, util, Runtime};
 
 use std::fmt;
@@ -140,7 +140,7 @@ impl TcpStream {
         util::poll_fn(|cx| {
             stream
                 .runtime
-                .core
+                .reactor
                 .poll_ready(stream.id, Direction::Write, cx)
         })
         .await?;

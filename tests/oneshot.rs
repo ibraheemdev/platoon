@@ -3,19 +3,7 @@ use tokio_test::*;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-
-trait SenderExt {
-    fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<()>;
-}
-
-impl<T> SenderExt for oneshot::Sender<T> {
-    fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        let mut fut = self.closed();
-        let fut = unsafe { Pin::new_unchecked(&mut fut) };
-        fut.poll(cx)
-    }
-}
+use std::task::Poll;
 
 #[test]
 fn send_recv() {
