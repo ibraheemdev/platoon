@@ -1,9 +1,9 @@
 [package]
 name = "platoon"
-version = "0.0.1-beta"
+version = "0.0.2-beta"
 edition = "2021"
-repository = "https://github.com/ibraheemdev/matchit"
-description = "An experimental mini async runtime"
+repository = "https://github.com/ibraheemdev/platoon"
+description = "An experimental mini async runtime."
 license = "MIT"
 
 [dependencies]
