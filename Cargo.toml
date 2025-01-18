@@ -1,8 +1,10 @@
 [package]
 name = "platoon"
-version = "0.1.0"
+version = "0.0.1-beta"
 edition = "2021"
 repository = "https://github.com/ibraheemdev/matchit"
+description = "An experimental mini async runtime"
+license = "MIT"
 
 [dependencies]
 futures-io = "0.3"
