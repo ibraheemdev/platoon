@@ -86,20 +86,9 @@ impl Reactor {
             return Poll::Ready(Ok(()));
         }
 
-        let had_poller = interest.has_poller();
-
-        if let Some(ref waker) = interest.poller {
-            if waker.will_wake(cx.waker()) {
-                return Poll::Pending;
-            }
-
-            util::wake(interest.poller.take().unwrap());
-        }
-
-        interest.poller = Some(cx.waker().clone());
-
-        if !had_poller {
-            Reactor::update_interest(&poller, key, source)?;
+        match interest.poller.replace(cx.waker().clone()) {
+            Some(waker) => util::wake(waker),
+            None => Reactor::update_interest(&poller, key, source)?,
         }
 
         Poll::Pending
@@ -125,7 +114,6 @@ impl Reactor {
         } = &mut *self.shared.borrow_mut();
 
         match poller.poll(events, timeout) {
-            Ok(0) => {}
             Ok(_) => {
                 for e in events.iter().map(Event::from) {
                     if let Some(source) = sources.get_mut(e.key) {

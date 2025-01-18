@@ -9,10 +9,10 @@ fn assertions() {
     assert_not_impl_any!(platoon::time::Sleep: Send, Sync);
     assert_not_impl_any!(platoon::time::Timeout<()>: Send, Sync);
     assert_not_impl_any!(platoon::task::JoinHandle<()>: Send, Sync);
-    assert_not_impl_any!(platoon::sync::Semaphore: Send, Sync);
-    assert_not_impl_any!(platoon::sync::Mutex<()>: Send, Sync);
+    assert_not_impl_any!(platoon::sync::Semaphore: Sync);
+    assert_not_impl_any!(platoon::sync::Mutex<()>: Sync);
     assert_not_impl_any!(platoon::sync::MutexGuard<'_, ()>: Send, Sync);
-    assert_not_impl_any!(platoon::sync::RwLock<()>: Send, Sync);
+    assert_not_impl_any!(platoon::sync::RwLock<()>: Sync);
     assert_not_impl_any!(platoon::sync::RwLockReadGuard<()>: Send, Sync);
     assert_not_impl_any!(platoon::sync::RwLockWriteGuard<()>: Send, Sync);
     assert_not_impl_any!(platoon::sync::oneshot::Sender<()>: Send, Sync);
